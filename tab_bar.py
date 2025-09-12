@@ -1,7 +1,8 @@
 from datetime import datetime
 import subprocess
 import re
-from typing import List, Tuple
+import time
+from typing import List, Tuple, Optional
 from kitty.boss import get_boss
 from kitty.fast_data_types import Screen, add_timer, get_options
 from kitty.utils import color_as_int
@@ -22,7 +23,9 @@ bat_text_color = as_rgb(color_as_int(opts.color15))
 clock_color = as_rgb(color_as_int(opts.color15))
 date_color = as_rgb(color_as_int(opts.color8))
 SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ('', '')
+LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ('', '')
 DIVIDER, SOFT_DIVIDER = ('', '')
+RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ('', '')
 RIGHT_MARGIN = 1
 REFRESH_TIME = 1
 ICON = ' 󰣇 '
@@ -150,13 +153,29 @@ def _draw_left_status(
     return end
 
 
-def _draw_right_status(screen: Screen, is_last: bool, cells: list) -> int:
+def _draw_right_status(screen: Screen, is_last: bool, cells: list, split_idx: Optional[int] = None) -> int:
     if not is_last:
         return 0
     draw_attributed_string(Formatter.reset, screen)
     screen.cursor.x = screen.columns - right_status_length
     screen.cursor.fg = 0
-    for color, status in cells:
+    bar_fg = as_rgb(color_as_int(opts.color8))
+    for i, (color, status) in enumerate(cells):
+        # Leading separators: hard at start, soft only at group boundary
+        if i == 0:
+            screen.cursor.fg = bar_fg
+            screen.draw(' ')
+            screen.draw(RIGHT_SOFT_DIVIDER)
+            screen.draw(' ')
+        elif split_idx is not None and i == split_idx:
+            screen.cursor.fg = bar_fg
+            screen.draw(' ')
+            screen.draw(RIGHT_SOFT_DIVIDER)
+            screen.draw(' ')
+        else:
+            # Plain space between items within a group
+            screen.draw(' ')
+        # Content
         screen.cursor.fg = color
         screen.draw(status)
     screen.cursor.bg = 0
@@ -170,42 +189,45 @@ def _redraw_tab_bar(_):
 
 
 # Linux
+def _battery_color(percent: int) -> int:
+    # Gradient: red (<20), yellow (<40), cyan (<80), green (>=80)
+    if percent < 20:
+        return as_rgb(color_as_int(opts.color1))
+    if percent < 40:
+        return as_rgb(color_as_int(opts.color3))
+    if percent < 80:
+        return as_rgb(color_as_int(opts.color6))
+    return as_rgb(color_as_int(opts.color2))
+
+
 def get_battery_cells() -> list:
     try:
         with open("/sys/class/power_supply/BAT0/status", "r") as f:
             status = f.read()
         with open("/sys/class/power_supply/BAT0/capacity", "r") as f:
             percent = int(f.read())
+        bat_color = _battery_color(percent)
         if status == "Discharging\n":
-            icon_color = UNPLUGGED_COLORS[
-                min(UNPLUGGED_COLORS.keys(), key=lambda x: abs(x - percent))
-            ]
             icon = UNPLUGGED_ICONS[
                 min(UNPLUGGED_ICONS.keys(), key=lambda x: abs(x - percent))
             ]
         elif status == "Not charging\n":
-            icon_color = UNPLUGGED_COLORS[
-                min(UNPLUGGED_COLORS.keys(), key=lambda x: abs(x - percent))
-            ]
             icon = PLUGGED_ICONS[
                 min(PLUGGED_ICONS.keys(), key=lambda x: abs(x - percent))
             ]
         else:
-            icon_color = PLUGGED_COLORS[
-                min(PLUGGED_COLORS.keys(), key=lambda x: abs(x - percent))
-            ]
             icon = PLUGGED_ICONS[
                 min(PLUGGED_ICONS.keys(), key=lambda x: abs(x - percent))
             ]
-        percent_cell = (bat_text_color, str(percent) + "% ")
-        icon_cell = (icon_color, icon)
-        return [percent_cell, icon_cell]
+        return [(bat_color, f"{icon} {percent}%")]
     except FileNotFoundError:
         return []
 
 
 _prev_cpu_total = None
 _prev_cpu_idle = None
+_cpu_cached: Optional[List[Tuple[int, str]]] = None
+_cpu_last_update: float = 0.0
 
 
 def _read_proc_stat():
@@ -225,23 +247,29 @@ def _read_proc_stat():
 
 
 def get_cpu_cells() -> List[Tuple[int, str]]:
-    global _prev_cpu_total, _prev_cpu_idle
-    stats = _read_proc_stat()
-    if not stats:
-        return []
-    total, idle = stats
-    if _prev_cpu_total is None:
-        _prev_cpu_total, _prev_cpu_idle = total, idle
-        return []
-    dt_total = total - _prev_cpu_total
-    dt_idle = idle - _prev_cpu_idle
-    _prev_cpu_total, _prev_cpu_idle = total, idle
-    if dt_total <= 0:
-        return []
-    usage = max(0.0, min(1.0, (dt_total - dt_idle) / dt_total))
-    pct = int(round(usage * 100))
-    color = CPU_LOW if pct < 40 else CPU_MED if pct < 75 else CPU_HIGH
-    return [(color, f"  {pct}% ")]
+    global _prev_cpu_total, _prev_cpu_idle, _cpu_cached, _cpu_last_update
+    now = time.monotonic()
+    # Throttle updates to avoid multi-tab race and flicker
+    if now - _cpu_last_update >= 0.8:
+        stats = _read_proc_stat()
+        if stats:
+            total, idle = stats
+            if _prev_cpu_total is None:
+                _prev_cpu_total, _prev_cpu_idle = total, idle
+                # Initialize placeholder; compute real value next interval
+                _cpu_cached = [(as_rgb(color_as_int(opts.color8)), " --%")]
+            else:
+                dt_total = total - _prev_cpu_total
+                dt_idle = idle - _prev_cpu_idle
+                if dt_total > 0:
+                    usage = max(0.0, min(1.0, (dt_total - dt_idle) / dt_total))
+                    pct = int(round(usage * 100))
+                    color = CPU_LOW if pct < 40 else CPU_MED if pct < 75 else CPU_HIGH
+                    _cpu_cached = [(color, f" {pct}%")]
+                _prev_cpu_total, _prev_cpu_idle = total, idle
+        _cpu_last_update = now
+    # Always return last cached to keep stable presence
+    return _cpu_cached or [(as_rgb(color_as_int(opts.color8)), " --%")]
 
 
 def get_mem_cells() -> List[Tuple[int, str]]:
@@ -257,7 +285,7 @@ def get_mem_cells() -> List[Tuple[int, str]]:
             return []
         used = total - avail
         pct = int(round(used * 100 / total))
-        return [(MEM_CLR, f"  {pct}% ")]
+        return [(MEM_CLR, f" {pct}%")]
     except Exception:
         return []
 
@@ -312,18 +340,36 @@ def draw_tab(
         global right_status_length
         if timer_id is None:
             timer_id = add_timer(_redraw_tab_bar, REFRESH_TIME, True)
-        date = datetime.now().strftime(' %Y.%m.%d')
-        clock = datetime.now().strftime(' %H:%M')
-        # Right status cells: CPU, RAM, battery, date, time
-        cells: List[Tuple[int, str]] = []
-        cells += get_cpu_cells()
-        cells += get_mem_cells()
-        cells += get_battery_cells()
-        cells.append((date_color, date))
-        cells.append((clock_color, clock))
+        date = datetime.now().strftime('%Y.%m.%d')
+        clock = datetime.now().strftime('%H:%M')
+        # Right status cells grouped: [CPU RAM BAT] | [DATE TIME]
+        metrics_cells: List[Tuple[int, str]] = []
+        metrics_cells += get_cpu_cells()
+        metrics_cells += get_mem_cells()
+        metrics_cells += get_battery_cells()
+        date_cells: List[Tuple[int, str]] = [(date_color, date), (clock_color, clock)]
+        cells: List[Tuple[int, str]] = metrics_cells + date_cells
+        split_idx = len(metrics_cells) if len(metrics_cells) > 0 else None
         right_status_length = RIGHT_MARGIN
-        for cell in cells:
-            right_status_length += len(str(cell[1]))
+        # Base content widths
+        for _, text in cells:
+            right_status_length += len(str(text))
+        # Separators and spaces
+        N = len(cells)
+        if N > 0:
+            # Initial hard divider ' < '
+            right_status_length += 3
+            if split_idx is None:
+                # Only plain spaces between items
+                right_status_length += max(0, N - 1)
+            else:
+                # Plain spaces within first group
+                right_status_length += max(0, split_idx - 1)
+                # Group soft divider ' | '
+                if 0 < split_idx < N:
+                    right_status_length += 3
+                # Plain spaces within second group
+                right_status_length += max(0, (N - split_idx - 1))
 
         _draw_icon(screen, index, tab=tab, draw_data=draw_data)
 
@@ -345,11 +391,7 @@ def draw_tab(
             is_last,
             extra_data,
         )
-        _draw_right_status(
-            screen,
-            is_last,
-            cells,
-        )
+        _draw_right_status(screen, is_last, cells, split_idx)
         return screen.cursor.x
     except Exception as e:
         import sys
