@@ -22,10 +22,10 @@ icon_bg = as_rgb(color_as_int(opts.background))
 bat_text_color = as_rgb(color_as_int(opts.color15))
 clock_color = as_rgb(color_as_int(opts.color15))
 date_color = as_rgb(color_as_int(opts.color8))
-SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ('', '')
-LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ('', '')
-DIVIDER, SOFT_DIVIDER = ('', '')
-RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ('', '')
+SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ('', '')
+LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ('', '')
+DIVIDER, SOFT_DIVIDER = ('', '') #('', '')
+RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ('', '') #('', '')
 RIGHT_MARGIN = 1
 REFRESH_TIME = 1
 ICON = ' 󰣇 '
@@ -119,19 +119,16 @@ def _draw_left_status(
         screen.cursor.x = len(ICON)
     # Leading space before content
     screen.draw(' ')
-    # Prefix with index to mimic wezterm tabline
-    try:
-        idx_text = f"{index} "
-        draw_attributed_string(idx_text, screen)
-    except Exception:
-        pass
     screen.cursor.bg = tab_bg
-    # Truncate tab title if too long
-    title = tab.title if hasattr(tab, 'title') else ''
-    if len(title) > max_title_length:
-        title = title[:max_title_length-1] + '…'
+    # Draw the tab title using kitty's helper to respect tab_title_template
     fg, bg = screen.cursor.fg, screen.cursor.bg
-    draw_attributed_string(title, screen)
+    try:
+        # Newer kitty versions accept max_title_length
+        draw_title(draw_data, screen, tab, index, max_title_length)
+    except TypeError:
+        # Fallback for older kitty versions
+        draw_title(draw_data, screen, tab, index)
+    # Restore colors after drawing title
     screen.cursor.fg, screen.cursor.bg = fg, bg
     if not needs_soft_separator:
         screen.draw(' ')
@@ -378,8 +375,8 @@ def draw_tab(
         total_tabs = len(get_boss().active_tab_manager.tabs) if get_boss() and get_boss().active_tab_manager else 1
         icon_and_divider = len(ICON) + len(SEPARATOR_SYMBOL) + 2  # +2 for spaces
         available_width = max(0, screen.columns - right_status_length - icon_and_divider)
-        # Add room for index prefix (approx 3 chars with space) and some padding
-        per_tab = max(6, int(available_width / total_tabs) - 4)  # min 6 chars
+        # Allocate per-tab width; no manual index prefix now
+        per_tab = max(6, int(available_width / total_tabs) - 2)
 
         _draw_left_status(
             draw_data,
