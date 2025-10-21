@@ -4,7 +4,7 @@ import re
 import time
 from typing import List, Tuple, Optional
 from kitty.boss import get_boss
-from kitty.fast_data_types import Screen, add_timer, get_options
+from kitty.fast_data_types import Screen, add_timer, get_options, wcswidth
 from kitty.utils import color_as_int
 from kitty.tab_bar import (
     DrawData,
@@ -120,16 +120,15 @@ def _draw_left_status(
     # Leading space before content
     screen.draw(' ')
     screen.cursor.bg = tab_bg
-    # Draw the tab title using kitty's helper to respect tab_title_template
-    fg, bg = screen.cursor.fg, screen.cursor.bg
-    try:
-        # Newer kitty versions accept max_title_length
-        draw_title(draw_data, screen, tab, index, max_title_length)
-    except TypeError:
-        # Fallback for older kitty versions
-        draw_title(draw_data, screen, tab, index)
-    # Restore colors after drawing title
-    screen.cursor.fg, screen.cursor.bg = fg, bg
+    # Get and truncate title based on cell width using config value
+    title = tab.title
+    max_len = opts.tab_title_max_length
+    if wcswidth(title) > max_len:
+        while wcswidth(title) > max_len - 1:
+            title = title[:-1]
+        title = title + '…'
+    # Draw truncated title
+    screen.draw(title)
     if not needs_soft_separator:
         screen.draw(' ')
         screen.cursor.fg = tab_bg
@@ -370,20 +369,12 @@ def draw_tab(
 
         _draw_icon(screen, index, tab=tab, draw_data=draw_data)
 
-        # Dynamically calculate max title length for tabs
-        # Estimate: available width = total columns - right_status_length - icon/divider - (tabs * padding)
-        total_tabs = len(get_boss().active_tab_manager.tabs) if get_boss() and get_boss().active_tab_manager else 1
-        icon_and_divider = len(ICON) + len(SEPARATOR_SYMBOL) + 2  # +2 for spaces
-        available_width = max(0, screen.columns - right_status_length - icon_and_divider)
-        # Allocate per-tab width; no manual index prefix now
-        per_tab = max(6, int(available_width / total_tabs) - 2)
-
         _draw_left_status(
             draw_data,
             screen,
             tab,
             before,
-            per_tab,
+            max_title_length,
             index,
             is_last,
             extra_data,
