@@ -1,7 +1,9 @@
+import sys
 from datetime import datetime
 import subprocess
 import re
 import time
+import os
 from typing import List, Tuple, Optional
 from kitty.boss import get_boss
 from kitty.fast_data_types import Screen, add_timer, get_options, wcswidth
@@ -17,81 +19,225 @@ from kitty.tab_bar import (
 )
 
 opts = get_options()
-icon_fg = as_rgb(color_as_int(opts.foreground))
-icon_bg = as_rgb(color_as_int(opts.background))
-bat_text_color = as_rgb(color_as_int(opts.color15))
-clock_color = as_rgb(color_as_int(opts.color15))
-date_color = as_rgb(color_as_int(opts.color8))
-SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ('', '')
-LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ('', '')
-DIVIDER, SOFT_DIVIDER = ('', '') #('', '')
-RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ('', '') #('', '')
+
+# Catppuccin Mocha palette (matching tmux config)
+ROSEWATER = as_rgb(color_as_int(0xF5E0DC))
+FLAMINGO = as_rgb(color_as_int(0xF2CDCD))
+PINK = as_rgb(color_as_int(0xF5C2E7))
+BLUE = as_rgb(color_as_int(0x89B4FA))
+LAVENDER = as_rgb(color_as_int(0xB4BEFE))
+GREEN = as_rgb(color_as_int(0xA6E3A1))
+TEAL = as_rgb(color_as_int(0x94E2D5))
+SKY = as_rgb(color_as_int(0x89DCEB))
+SAPPHIRE = as_rgb(color_as_int(0x74C7EC))
+PEACH = as_rgb(color_as_int(0xFAB387))
+YELLOW = as_rgb(color_as_int(0xF9E2AF))
+MAUVE = as_rgb(color_as_int(0xCBA6F7))
+RED = as_rgb(color_as_int(0xF38BA8))
+MAROON = as_rgb(color_as_int(0xEBA0AC))
+TEXT = as_rgb(color_as_int(0xCDD6F4))
+SUBTEXT1 = as_rgb(color_as_int(0xBAC2DE))
+SUBTEXT0 = as_rgb(color_as_int(0xA6ADC8))
+OVERLAY0 = as_rgb(color_as_int(0x6C7086))
+OVERLAY1 = as_rgb(color_as_int(0x7F849C))
+OVERLAY2 = as_rgb(color_as_int(0x9399B2))
+SURFACE0 = as_rgb(color_as_int(0x313244))
+SURFACE1 = as_rgb(color_as_int(0x45475A))
+SURFACE2 = as_rgb(color_as_int(0x585B70))
+BASE = as_rgb(color_as_int(0x1E1E2E))
+MANTLE = as_rgb(color_as_int(0x181825))
+CRUST = as_rgb(color_as_int(0x11111B))
+
+# Mode colors
+MODE_PREFIX = PEACH
+MODE_COPY = BLUE
+MODE_ZOOM = TEAL
+MODE_NORMAL = MAUVE
+
+# Separators
+SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ("", "")
+LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ("", "")
+DIVIDER, SOFT_DIVIDER = ("", "")
+RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ("", "")
+
+# Other settings
 RIGHT_MARGIN = 1
 REFRESH_TIME = 1
-ICON = ' 󰣇 '
+ICON = " 󰣇 "
 UNPLUGGED_ICONS = {
-    10: '󰁺',
-    20: '󰁻',
-    30: '󰁼',
-    40: '󰁽',
-    50: '󰁾',
-    60: '󰁿',
-    70: '󰂀',
-    80: '󰂁',
-    90: '󰂂',
-    100: '󰁹',
+    10: "󰁺",
+    20: "󰁻",
+    30: "󰁼",
+    40: "󰁽",
+    50: "󰁾",
+    60: "󰁿",
+    70: "󰂀",
+    80: "󰂁",
+    90: "󰂂",
+    100: "󰁹",
 }
 PLUGGED_ICONS = {
-    1: '󰂄',
+    1: "󰂄",
 }
 UNPLUGGED_COLORS = {
-    15: as_rgb(color_as_int(opts.color1)),
-    16: as_rgb(color_as_int(opts.color15)),
+    15: RED,
+    16: TEXT,
 }
 PLUGGED_COLORS = {
-    15: as_rgb(color_as_int(opts.color1)),
-    16: as_rgb(color_as_int(opts.color6)),
-    99: as_rgb(color_as_int(opts.color6)),
-    100: as_rgb(color_as_int(opts.color2)),
+    15: RED,
+    16: SAPPHIRE,
+    99: SAPPHIRE,
+    100: GREEN,
 }
 
 # Simple palette helpers for metrics
-CPU_LOW = as_rgb(color_as_int(opts.color2))
-CPU_MED = as_rgb(color_as_int(opts.color3))
-CPU_HIGH = as_rgb(color_as_int(opts.color1))
-MEM_CLR = as_rgb(color_as_int(opts.color4))
+CPU_LOW = GREEN
+CPU_MED = YELLOW
+CPU_HIGH = RED
+MEM_CLR = BLUE
 
 
-def _draw_icon(screen: Screen, index: int, tab=None, draw_data=None) -> int:
+def _get_mode_color() -> Tuple[int, str]:
+    """Get current mode color and name"""
+    boss = get_boss()
+    active_window = boss.active_window
+
+    if active_window:
+        # Check if in prefix mode (kitty equivalent of tmux prefix)
+        if hasattr(active_window, "is_key_pressed") and active_window.is_key_pressed(
+            "ctrl"
+        ):
+            return MODE_PREFIX, "PREFIX"
+
+        # Check if in copy mode
+        if hasattr(active_window, "in_copy_mode") and active_window.in_copy_mode:
+            return MODE_COPY, "COPY"
+
+        # Check if zoomed
+        if hasattr(active_window, "is_zoomed") and active_window.is_zoomed:
+            return MODE_ZOOM, "ZOOM"
+
+    return MODE_NORMAL, "NORMAL"
+
+
+def _draw_mode_indicator(screen: Screen, index: int, tab=None, draw_data=None) -> int:
+    """Draw mode indicator like tmux lualine"""
     try:
         if index != 1:
             return 0
+
         fg, bg = screen.cursor.fg, screen.cursor.bg
-        # Draw icon
-        screen.cursor.fg = icon_fg
-        screen.cursor.bg = icon_bg
-        screen.draw(ICON)
-        # Draw divider after icon with correct colors
-        screen.cursor.fg = icon_bg
-        # Determine tab backgrounds for divider
-        active_tab_bg = as_rgb(color_as_int(opts.active_tab_background)) #as_rgb(draw_data.active_tab_bg) if draw_data else icon_bg
-        inactive_tab_bg = as_rgb(color_as_int(opts.inactive_tab_background)) #as_rgb(draw_data.inactive_tab_bg) if draw_data else icon_bg
-        is_active_tab = tab.is_active if tab and hasattr(tab, 'is_active') else False
-        # print(f"is_active_tab: %s", is_active_tab)
-        if is_active_tab:
-            screen.cursor.bg = active_tab_bg
-        else:
-            screen.cursor.bg = inactive_tab_bg
+        mode_color, mode_name = _get_mode_color()
+
+        # Draw mode indicator with icon
+        screen.cursor.fg = CRUST
+        screen.cursor.bg = mode_color
+
+        mode_icons = {
+            "PREFIX": "󰘳",
+            "COPY": "",
+            "ZOOM": "",
+            "NORMAL": "",
+        }
+
+        icon = mode_icons.get(mode_name, "")
+        screen.draw(f" {icon} {mode_name} ")
+
+        # Draw separator to session section
+        screen.cursor.fg = mode_color
+        screen.cursor.bg = SURFACE0
         screen.draw(SEPARATOR_SYMBOL)
+
         screen.cursor.fg, screen.cursor.bg = fg, bg
-        screen.cursor.x = len(ICON) + len(SEPARATOR_SYMBOL)
         return screen.cursor.x
     except Exception as e:
         import sys
-        print(f"tab_bar.py error in _draw_icon: {e}", file=sys.stderr)
+
+        print(f"tab_bar.py error in _draw_mode_indicator: {e}", file=sys.stderr)
         return 0
 
 
+def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> int:
+    """Draw current path with powerline separators"""
+    try:
+        # Only draw once for the first tab
+        if index != 1:
+            return 0
+
+        fg, bg = screen.cursor.fg, screen.cursor.bg
+        mode_color, _ = _get_mode_color()
+
+        # Get current working directory of the active window in the active tab
+        cwd = ""
+        boss = get_boss()
+        if boss and boss.active_tab and boss.active_tab.active_window:
+            cwd = boss.active_tab.active_window.cwd_of_child or ""
+        
+        # Fallback to os.getcwd() if empty (though unlikely for a shell)
+        if not cwd:
+            cwd = os.getcwd()
+
+        # Convert home directory to ~
+        home = os.path.expanduser("~")
+        if cwd.startswith(home):
+            cwd = "~" + cwd[len(home) :]
+        
+        # Show only last two directories like tmux
+        parts = cwd.split("/")
+        if len(parts) > 2:
+            cwd = "/".join(parts[-2:])
+
+        # Position after mode indicator
+        # Mode indicator width calculation: "  NORMAL " + separator
+        # We need to calculate where _draw_mode_indicator left off. 
+        # Since we can't easily share state, we recalculate or just let screen.cursor.x be.
+        # However, _draw_mode_indicator is called right before this. 
+        # Assuming screen.cursor.x is correct.
+        
+        # Path Background Color
+        PATH_BG = SURFACE0
+        PATH_FG = mode_color
+
+        # Draw separator from Mode to Path
+        # Previous bg was ModeColor (from mode indicator text)
+        # But wait, the mode indicator ends with a separator: 
+        # screen.cursor.fg = mode_color; screen.cursor.bg = SURFACE0; draw(SEPARATOR)
+        # So the background at the cursor is currently SURFACE0 (from the separator drawing)? 
+        # No, draw(SEPARATOR) puts the char. The cursor position is after it.
+        # We need to continue from there.
+        
+        # Actually, _draw_mode_indicator ends with:
+        # screen.cursor.fg = mode_color
+        # screen.cursor.bg = SURFACE0
+        # screen.draw(SEPARATOR_SYMBOL)
+        # So physically we are at SURFACE0 "background" context visually (the arrow point).
+        
+        # BUT, the user wants: MODE (bg=Mode) -> Sep (fg=Mode, bg=PathBG) -> Path (bg=PathBG).
+        # In _draw_mode_indicator, it does: bg=SURFACE0 for the separator. 
+        # If we want Path to be SURFACE0, that matches.
+        
+        # Draw current path
+        screen.cursor.fg = PATH_FG
+        screen.cursor.bg = PATH_BG
+        screen.draw(f" {cwd} ")
+
+        # Draw separator from Path to Tabs (Default BG)
+        # The tabs use 'default_bg' which is usually opaque or transparent.
+        # We need to transition from PATH_BG to Default.
+        default_bg = as_rgb(int(draw_data.default_bg))
+        
+        screen.cursor.fg = PATH_BG
+        screen.cursor.bg = default_bg
+        screen.draw(SEPARATOR_SYMBOL)
+        
+        # Add a space after
+        screen.draw(" ")
+
+        screen.cursor.fg, screen.cursor.bg = fg, bg
+        return screen.cursor.x
+    except Exception as e:
+        print(f"tab_bar.py error in _draw_session_info: {e}", file=sys.stderr)
+        return 0
 
 
 def _draw_left_status(
@@ -106,74 +252,66 @@ def _draw_left_status(
 ) -> int:
     if screen.cursor.x >= screen.columns - right_status_length:
         return screen.cursor.x
-    tab_bg = screen.cursor.bg
-    tab_fg = screen.cursor.fg
+
+    # Save current colors
+    fg, bg = screen.cursor.fg, screen.cursor.bg
+
+    # Reset to default background for tabs
     default_bg = as_rgb(int(draw_data.default_bg))
-    if extra_data.next_tab:
-        next_tab_bg = as_rgb(draw_data.tab_bg(extra_data.next_tab))
-        needs_soft_separator = next_tab_bg == tab_bg
-    else:
-        next_tab_bg = default_bg
-        needs_soft_separator = False
-    if screen.cursor.x <= len(ICON):
-        screen.cursor.x = len(ICON)
-    # Leading space before content
-    screen.draw(' ')
-    screen.cursor.bg = tab_bg
+    screen.cursor.bg = default_bg
+
     # Get and truncate title based on cell width using config value
     title = tab.title
     max_len = opts.tab_title_max_length
     if wcswidth(title) > max_len:
         while wcswidth(title) > max_len - 1:
             title = title[:-1]
-        title = title + '…'
-    # Draw truncated title
-    screen.draw(title)
-    if not needs_soft_separator:
-        screen.draw(' ')
-        screen.cursor.fg = tab_bg
-        screen.cursor.bg = next_tab_bg
-        screen.draw(SEPARATOR_SYMBOL)
+        title = title + "…"
+
+    # Tab styling and indicator
+    if tab.is_active:
+        screen.cursor.fg = PEACH
+        screen.draw("[")
+        screen.draw(title)
+        screen.draw("]")
     else:
-        prev_fg = screen.cursor.fg
-        if tab_bg == tab_fg:
-            screen.cursor.fg = default_bg
-        elif tab_bg != default_bg:
-            c1 = draw_data.inactive_bg.contrast(draw_data.default_bg)
-            c2 = draw_data.inactive_bg.contrast(draw_data.inactive_fg)
-            if c1 < c2:
-                screen.cursor.fg = default_bg
-        screen.draw(' ' + SOFT_SEPARATOR_SYMBOL)
-        screen.cursor.fg = prev_fg
+        screen.cursor.fg = OVERLAY0
+        screen.draw(title)
+
+    # Add separator if not last tab
+    if not is_last:
+        # The user's desired layout has "tab1  tab2"
+        # So we need a space before and after the soft separator
+        screen.draw(" " + SOFT_SEPARATOR_SYMBOL + " ")
+
+    # Restore original colors
+    screen.cursor.fg, screen.cursor.bg = fg, bg
+
     end = screen.cursor.x
     return end
 
 
-def _draw_right_status(screen: Screen, is_last: bool, cells: list, split_idx: Optional[int] = None) -> int:
+def _draw_right_status(
+    screen: Screen, is_last: bool, cells: list
+) -> int:
     if not is_last:
         return 0
     draw_attributed_string(Formatter.reset, screen)
     screen.cursor.x = screen.columns - right_status_length
     screen.cursor.fg = 0
-    bar_fg = as_rgb(color_as_int(opts.color8))
-    for i, (color, status) in enumerate(cells):
-        # Leading separators: hard at start, soft only at group boundary
-        if i == 0:
-            screen.cursor.fg = bar_fg
-            screen.draw(' ')
-            screen.draw(RIGHT_SOFT_DIVIDER)
-            screen.draw(' ')
-        elif split_idx is not None and i == split_idx:
-            screen.cursor.fg = bar_fg
-            screen.draw(' ')
-            screen.draw(RIGHT_SOFT_DIVIDER)
-            screen.draw(' ')
-        else:
-            # Plain space between items within a group
-            screen.draw(' ')
-        # Content
-        screen.cursor.fg = color
-        screen.draw(status)
+
+    # cells is a list of (fg, bg, text)
+    # We iterate and draw.
+    # Note: The 'cells' list must be prepared such that hard dividers are separate items 
+    # or we handle them here. 
+    # Given the complexity, let's assume 'cells' contains EVERYTHING to be drawn,
+    # including separators as explicit items with their own fg/bg.
+    
+    for fg, bg, text in cells:
+        screen.cursor.fg = fg
+        screen.cursor.bg = bg
+        screen.draw(text)
+        
     screen.cursor.bg = 0
     return screen.cursor.x
 
@@ -188,12 +326,12 @@ def _redraw_tab_bar(_):
 def _battery_color(percent: int) -> int:
     # Gradient: red (<20), yellow (<40), cyan (<80), green (>=80)
     if percent < 20:
-        return as_rgb(color_as_int(opts.color1))
+        return RED
     if percent < 40:
-        return as_rgb(color_as_int(opts.color3))
+        return YELLOW
     if percent < 80:
-        return as_rgb(color_as_int(opts.color6))
-    return as_rgb(color_as_int(opts.color2))
+        return SAPPHIRE
+    return GREEN
 
 
 def get_battery_cells() -> list:
@@ -228,9 +366,9 @@ _cpu_last_update: float = 0.0
 
 def _read_proc_stat():
     try:
-        with open('/proc/stat', 'r') as f:
+        with open("/proc/stat", "r") as f:
             line = f.readline()
-        if not line.startswith('cpu'):
+        if not line.startswith("cpu"):
             return None
         parts = line.split()
         values = list(map(int, parts[1:]))
@@ -253,7 +391,7 @@ def get_cpu_cells() -> List[Tuple[int, str]]:
             if _prev_cpu_total is None:
                 _prev_cpu_total, _prev_cpu_idle = total, idle
                 # Initialize placeholder; compute real value next interval
-                _cpu_cached = [(as_rgb(color_as_int(opts.color8)), " --%")]
+                _cpu_cached = [(OVERLAY0, " --%")]
             else:
                 dt_total = total - _prev_cpu_total
                 dt_idle = idle - _prev_cpu_idle
@@ -265,18 +403,18 @@ def get_cpu_cells() -> List[Tuple[int, str]]:
                 _prev_cpu_total, _prev_cpu_idle = total, idle
         _cpu_last_update = now
     # Always return last cached to keep stable presence
-    return _cpu_cached or [(as_rgb(color_as_int(opts.color8)), " --%")]
+    return _cpu_cached or [(OVERLAY0, " --%")]
 
 
 def get_mem_cells() -> List[Tuple[int, str]]:
     try:
         meminfo = {}
-        with open('/proc/meminfo', 'r') as f:
+        with open("/proc/meminfo", "r") as f:
             for line in f:
-                key, val = line.split(':', 1)
+                key, val = line.split(":", 1)
                 meminfo[key] = int(val.strip().split()[0])
-        total = meminfo.get('MemTotal')
-        avail = meminfo.get('MemAvailable')
+        total = meminfo.get("MemTotal")
+        avail = meminfo.get("MemAvailable")
         if not total or not avail:
             return []
         used = total - avail
@@ -284,6 +422,7 @@ def get_mem_cells() -> List[Tuple[int, str]]:
         return [(MEM_CLR, f" {pct}%")]
     except Exception:
         return []
+
 
 # Mac
 # def get_battery_cells() -> list:
@@ -336,38 +475,114 @@ def draw_tab(
         global right_status_length
         if timer_id is None:
             timer_id = add_timer(_redraw_tab_bar, REFRESH_TIME, True)
-        date = datetime.now().strftime('%Y.%m.%d')
-        clock = datetime.now().strftime('%H:%M')
-        # Right status cells grouped: [CPU RAM BAT] | [DATE TIME]
-        metrics_cells: List[Tuple[int, str]] = []
-        metrics_cells += get_cpu_cells()
-        metrics_cells += get_mem_cells()
-        metrics_cells += get_battery_cells()
-        date_cells: List[Tuple[int, str]] = [(date_color, date), (clock_color, clock)]
-        cells: List[Tuple[int, str]] = metrics_cells + date_cells
-        split_idx = len(metrics_cells) if len(metrics_cells) > 0 else None
-        right_status_length = RIGHT_MARGIN
-        # Base content widths
-        for _, text in cells:
-            right_status_length += len(str(text))
-        # Separators and spaces
-        N = len(cells)
-        if N > 0:
-            # Initial hard divider ' < '
-            right_status_length += 3
-            if split_idx is None:
-                # Only plain spaces between items
-                right_status_length += max(0, N - 1)
-            else:
-                # Plain spaces within first group
-                right_status_length += max(0, split_idx - 1)
-                # Group soft divider ' | '
-                if 0 < split_idx < N:
-                    right_status_length += 3
-                # Plain spaces within second group
-                right_status_length += max(0, (N - split_idx - 1))
 
-        _draw_icon(screen, index, tab=tab, draw_data=draw_data)
+        screen.cursor.x = before # Initialize cursor position for this tab
+
+        mode_color, _ = _get_mode_color()
+        clock = datetime.now().strftime("%H:%M")
+
+        # Layout:
+        # [Soft Sep] [Metrics (BG=CRUST)] [Hard Sep] [User (BG=SURFACE0)] [Hard Sep] [Clock (BG=Mode)]
+        
+        # Colors
+        BG_METRICS = CRUST
+        BG_USER = SURFACE0
+        BG_CLOCK = mode_color
+        
+        FG_METRICS = TEXT
+        FG_USER = mode_color
+        FG_CLOCK = CRUST # Contrast on bright mode color
+        
+        default_bg = as_rgb(int(draw_data.default_bg))
+
+        # Metrics content
+        metrics_content = []
+        cpu = get_cpu_cells() # list of (color, text)
+        mem = get_mem_cells()
+        bat = get_battery_cells()
+        
+        # List of (fg, bg, text)
+        cells = []
+        
+        # 1. Start with Soft Divider
+        cells.append((BG_METRICS, default_bg, RIGHT_DIVIDER))
+        
+        # Add Metrics
+        cells.append((FG_METRICS, BG_METRICS, " "))
+        
+        # CPU
+        for color, text in cpu:
+             cells.append((color, BG_METRICS, text + " "))
+        # Mem
+        for color, text in mem:
+             cells.append((color, BG_METRICS, text + " "))
+        # Bat
+        for color, text in bat:
+             cells.append((color, BG_METRICS, text + " "))
+             
+        # 2. Transition to User
+        cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+        
+        # User content
+        user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
+        cells.append((FG_USER, BG_USER, f" {user_host} "))
+        
+        # 3. Transition to Clock
+        cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
+        
+        # Clock content
+        cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
+
+        # Calculate right status length
+        right_status_length = 0
+        for _, _, text in cells:
+            right_status_length += wcswidth(str(text))
+
+        # Draw left side components - only for first tab to avoid duplicates
+        if index == 1:
+            orig_bold = screen.cursor.bold
+            orig_italic = screen.cursor.italic
+            
+            screen.cursor.bold = True
+            screen.cursor.italic = False
+            
+            _draw_mode_indicator(screen, index, tab=tab, draw_data=draw_data)
+            left_status_end_x = _draw_session_info(screen, index, tab=tab, draw_data=draw_data)
+            
+            screen.cursor.bold = orig_bold
+            screen.cursor.italic = orig_italic
+
+            # Calculate total width of all tabs
+            total_tabs_width = 0
+            tm = get_boss().active_tab_manager
+            tabs = tm.tabs if tm else []
+            
+            for i, a_tab in enumerate(tabs):
+                a_title = a_tab.title
+                max_len = opts.tab_title_max_length
+                if wcswidth(a_title) > max_len:
+                    while wcswidth(a_title) > max_len - 1:
+                        a_title = a_title[:-1]
+                    a_title = a_title + "…"
+
+                # Check if active
+                is_active = (a_tab.id == tm.active_tab.id) if tm and tm.active_tab else False
+
+                if is_active:
+                    total_tabs_width += wcswidth("[") + wcswidth(a_title) + wcswidth("]")
+                else:
+                    total_tabs_width += wcswidth(a_title)
+                
+                # Add separator width if not the last tab
+                if i < len(tabs) - 1:
+                    total_tabs_width += wcswidth(" " + SOFT_SEPARATOR_SYMBOL + " ")
+            
+            # Calculate padding for centering
+            available_space = screen.columns - left_status_end_x - right_status_length
+            padding = max(0, (available_space - total_tabs_width) // 2)
+            
+            # Apply padding
+            screen.cursor.x = int(left_status_end_x + padding)
 
         _draw_left_status(
             draw_data,
@@ -379,9 +594,8 @@ def draw_tab(
             is_last,
             extra_data,
         )
-        _draw_right_status(screen, is_last, cells, split_idx)
+        _draw_right_status(screen, is_last, cells)
         return screen.cursor.x
     except Exception as e:
-        import sys
         print(f"tab_bar.py error in draw_tab: {e}", file=sys.stderr)
         return screen.cursor.x
