@@ -270,10 +270,8 @@ def _draw_left_status(
 
     # Tab styling and indicator
     if tab.is_active:
-        screen.cursor.fg = PEACH
-        screen.draw("[")
+        screen.cursor.fg = SUBTEXT0
         screen.draw(title)
-        screen.draw("]")
     else:
         screen.cursor.fg = OVERLAY0
         screen.draw(title)
