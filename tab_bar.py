@@ -55,10 +55,10 @@ MODE_ZOOM = TEAL
 MODE_NORMAL = MAUVE
 
 # Separators
-SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ("", "󰿟")
-LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ("", "󰿟")
-DIVIDER, SOFT_DIVIDER = ("", "󰿟")
-RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ("", "󰿟")
+SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ("", "")
+LEFT_SEPARATOR_SYMBOL, LEFT_SOFT_SEPARATOR_SYMBOL = ("", "")
+DIVIDER, SOFT_DIVIDER = ("", "")
+RIGHT_DIVIDER, RIGHT_SOFT_DIVIDER = ("", "")
 
 # Other settings
 RIGHT_MARGIN = 1
@@ -294,7 +294,6 @@ def _draw_right_status(screen: Screen, is_last: bool, cells: list) -> int:
         return 0
     draw_attributed_string(Formatter.reset, screen)
     screen.cursor.x = screen.columns - right_status_length
-    screen.cursor.fg = 0
 
     # cells is a list of (fg, bg, text)
     # We iterate and draw.
@@ -500,21 +499,24 @@ def draw_tab(
         # List of (fg, bg, text)
         cells = []
 
-        # 1. Start with Soft Divider
-        cells.append((BG_METRICS, default_bg, RIGHT_DIVIDER))
+        # 1. Start with Soft Separator (backslash variant)
+        cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER))
 
         # Add Metrics
-        cells.append((FG_METRICS, BG_METRICS, " "))
+        cells.append((FG_METRICS, BG_METRICS, RIGHT_SOFT_DIVIDER + " "))
 
-        # CPU
+        # CPU - pad to fixed width
         for color, text in cpu:
-            cells.append((color, BG_METRICS, text + " "))
-        # Mem
+            padded_text = text.ljust(5)  # " 45%" -> " 45%  "
+            cells.append((color, BG_METRICS, padded_text + " "))
+        # Mem - pad to fixed width
         for color, text in mem:
-            cells.append((color, BG_METRICS, text + " "))
-        # Bat
+            padded_text = text.ljust(5)  # " 67%" -> " 67%  "
+            cells.append((color, BG_METRICS, padded_text + " "))
+        # Bat - pad to fixed width
         for color, text in bat:
-            cells.append((color, BG_METRICS, text + " "))
+            padded_text = text.ljust(6)  # "󰁹 85%" -> "󰁹 85%   "
+            cells.append((color, BG_METRICS, padded_text + " "))
 
         # 2. Transition to User
         cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
