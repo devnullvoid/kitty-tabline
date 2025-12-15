@@ -247,9 +247,10 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
             screen.cursor.bg = PROCESS_BG
             screen.draw(SEPARATOR_SYMBOL)
         else:
-            # No git, just start with process section
-            # Draw separator from Mode to Process directly
-            screen.cursor.fg = mode_color
+            # No git, just process section - draw separator from Mode to Process
+            # The mode indicator ends with: fg=mode_color, bg=SURFACE0 separator
+            # So we need to transition from SURFACE0 to PROCESS_BG
+            screen.cursor.fg = SURFACE0
             screen.cursor.bg = PROCESS_BG
             screen.draw(SEPARATOR_SYMBOL)
 
