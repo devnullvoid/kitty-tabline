@@ -157,12 +157,139 @@ def _draw_mode_indicator(screen: Screen, index: int, tab=None, draw_data=None) -
         return 0
 
 
+def _get_git_branch() -> str:
+    """Get current git branch name"""
+    try:
+        # Get current working directory
+        boss = get_boss()
+        if boss and boss.active_tab and boss.active_tab.active_window:
+            cwd = boss.active_tab.active_window.cwd_of_child or ""
+        else:
+            cwd = os.getcwd()
+
+        # Check if we're in a git repo
+        git_dir = os.path.join(cwd, ".git")
+        if not os.path.exists(git_dir):
+            return ""
+
+        # Try to get branch name
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            return branch if branch and branch != "HEAD" else ""
+        return ""
+    except (
+        subprocess.TimeoutExpired,
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+    ):
+        return ""
+
+
+def _get_process_name() -> str:
+    """Get current process name"""
+    try:
+        boss = get_boss()
+        if boss and boss.active_tab and boss.active_tab.active_window:
+            # Try to get the foreground process name
+            cwd = boss.active_tab.active_window.cwd_of_child or ""
+            if cwd:
+                # Get the current shell or process from environment
+                shell = os.getenv("SHELL", "")
+                if "zsh" in shell:
+                    return "zsh"
+                elif "bash" in shell:
+                    return "bash"
+                elif "fish" in shell:
+                    return "fish"
+                else:
+                    return os.path.basename(shell) if shell else "shell"
+        return "shell"
+    except Exception:
+        return "shell"
+
+
 def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> int:
-    """Draw current path with powerline separators"""
+    """Draw git branch and process name with powerline separators"""
     try:
         # Only draw once for the first tab
         if index != 1:
             return 0
+
+        fg, bg = screen.cursor.fg, screen.cursor.bg
+        mode_color, _ = _get_mode_color()
+
+        # Get git branch and process name
+        git_branch = _get_git_branch()
+        process_name = _get_process_name()
+
+        # Background colors for sections
+        GIT_BG = SURFACE0
+        GIT_FG = TEAL  # Green for git like tmux
+        PROCESS_BG = SURFACE1
+        PROCESS_FG = BLUE  # Blue for processes
+
+        # Draw git section if we have a branch
+        if git_branch:
+            # Git icon and branch
+            screen.cursor.fg = GIT_FG
+            screen.cursor.bg = GIT_BG
+            screen.draw(f"  {git_branch} ")
+
+            # Separator from git to process
+            screen.cursor.fg = GIT_BG
+            screen.cursor.bg = PROCESS_BG
+            screen.draw(SEPARATOR_SYMBOL)
+        else:
+            # No git, just start with process section
+            # Draw separator from Mode to Process directly
+            screen.cursor.fg = mode_color
+            screen.cursor.bg = PROCESS_BG
+            screen.draw(SEPARATOR_SYMBOL)
+
+        # Draw process section
+        screen.cursor.fg = PROCESS_FG
+        screen.cursor.bg = PROCESS_BG
+
+        # Process icons
+        process_icons = {
+            "zsh": "󰉋 ",
+            "bash": " ",
+            "fish": " ",
+            "shell": " ",
+            "nvim": " ",
+            "vim": " ",
+        }
+
+        icon = process_icons.get(process_name, " ")
+        screen.draw(f"{icon}{process_name} ")
+
+        # Draw separator from Process to Tabs (Default BG)
+        default_bg = as_rgb(int(draw_data.default_bg))
+
+        # If we had git, transition from PROCESS_BG, otherwise from mode_color
+        if git_branch:
+            screen.cursor.fg = PROCESS_BG
+        else:
+            screen.cursor.fg = mode_color
+
+        screen.cursor.bg = default_bg
+        screen.draw(SEPARATOR_SYMBOL)
+
+        # Add a space after
+        screen.draw(" ")
+
+        screen.cursor.fg, screen.cursor.bg = fg, bg
+        return screen.cursor.x
+    except Exception as e:
+        print(f"tab_bar.py error in _draw_session_info: {e}", file=sys.stderr)
+        return 0
 
         fg, bg = screen.cursor.fg, screen.cursor.bg
         mode_color, _ = _get_mode_color()
