@@ -274,12 +274,8 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
         # Draw separator from Process to Tabs (Default BG)
         default_bg = as_rgb(int(draw_data.default_bg))
 
-        # If we had git, transition from PROCESS_BG, otherwise from mode_color
-        if git_branch:
-            screen.cursor.fg = PROCESS_BG
-        else:
-            screen.cursor.fg = mode_color
-
+        # Always transition from PROCESS_BG to default_bg
+        screen.cursor.fg = PROCESS_BG
         screen.cursor.bg = default_bg
         screen.draw(SEPARATOR_SYMBOL)
 
