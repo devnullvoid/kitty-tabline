@@ -231,8 +231,8 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
 
         # Background colors for sections
         GIT_BG = SURFACE0
-        GIT_FG = TEAL  # Green for git like tmux
-        PROCESS_BG = SURFACE1
+        GIT_FG = MAUVE  # Mauve for git like lualine
+        PROCESS_BG = BASE
         PROCESS_FG = BLUE  # Blue for processes
 
         # Draw git section if we have a branch
@@ -269,7 +269,7 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
         }
 
         icon = process_icons.get(process_name, " ")
-        screen.draw(f"{icon}{process_name} ")
+        screen.draw(f" {icon}{process_name} ")
 
         # Draw separator from Process to Tabs (Default BG)
         default_bg = as_rgb(int(draw_data.default_bg))
