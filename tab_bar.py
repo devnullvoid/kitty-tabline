@@ -150,10 +150,8 @@ def _draw_mode_indicator(screen: Screen, index: int, tab=None, draw_data=None) -
 
         screen.cursor.fg, screen.cursor.bg = fg, bg
         return screen.cursor.x
-    except Exception as e:
-        import sys
-
-        print(f"tab_bar.py error in _draw_mode_indicator: {e}", file=sys.stderr)
+    except Exception:
+        # Silently fail to avoid stderr output that could show as red text
         return 0
 
 
@@ -229,6 +227,13 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
         git_branch = _get_git_branch()
         process_name = _get_process_name()
 
+        # Truncate git branch to prevent it from taking too much space
+        MAX_BRANCH_LEN = 25
+        if git_branch and wcswidth(git_branch) > MAX_BRANCH_LEN:
+            while wcswidth(git_branch) > MAX_BRANCH_LEN - 1:
+                git_branch = git_branch[:-1]
+            git_branch = git_branch + "…"
+
         # Background colors for sections
         GIT_BG = SURFACE0
         GIT_FG = MAUVE  # Mauve for git like lualine
@@ -284,83 +289,8 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
 
         screen.cursor.fg, screen.cursor.bg = fg, bg
         return screen.cursor.x
-    except Exception as e:
-        print(f"tab_bar.py error in _draw_session_info: {e}", file=sys.stderr)
-        return 0
-
-        fg, bg = screen.cursor.fg, screen.cursor.bg
-        mode_color, _ = _get_mode_color()
-
-        # Get current working directory of the active window in the active tab
-        cwd = ""
-        boss = get_boss()
-        if boss and boss.active_tab and boss.active_tab.active_window:
-            cwd = boss.active_tab.active_window.cwd_of_child or ""
-
-        # Fallback to os.getcwd() if empty (though unlikely for a shell)
-        if not cwd:
-            cwd = os.getcwd()
-
-        # Convert home directory to ~
-        home = os.path.expanduser("~")
-        if cwd.startswith(home):
-            cwd = "~" + cwd[len(home) :]
-
-        # Show only last two directories like tmux
-        parts = cwd.split("/")
-        if len(parts) > 2:
-            cwd = "/".join(parts[-2:])
-
-        # Position after mode indicator
-        # Mode indicator width calculation: "  NORMAL " + separator
-        # We need to calculate where _draw_mode_indicator left off.
-        # Since we can't easily share state, we recalculate or just let screen.cursor.x be.
-        # However, _draw_mode_indicator is called right before this.
-        # Assuming screen.cursor.x is correct.
-
-        # Path Background Color
-        PATH_BG = SURFACE0
-        PATH_FG = mode_color
-
-        # Draw separator from Mode to Path
-        # Previous bg was ModeColor (from mode indicator text)
-        # But wait, the mode indicator ends with a separator:
-        # screen.cursor.fg = mode_color; screen.cursor.bg = SURFACE0; draw(SEPARATOR)
-        # So the background at the cursor is currently SURFACE0 (from the separator drawing)?
-        # No, draw(SEPARATOR) puts the char. The cursor position is after it.
-        # We need to continue from there.
-
-        # Actually, _draw_mode_indicator ends with:
-        # screen.cursor.fg = mode_color
-        # screen.cursor.bg = SURFACE0
-        # screen.draw(SEPARATOR_SYMBOL)
-        # So physically we are at SURFACE0 "background" context visually (the arrow point).
-
-        # BUT, the user wants: MODE (bg=Mode) -> Sep (fg=Mode, bg=PathBG) -> Path (bg=PathBG).
-        # In _draw_mode_indicator, it does: bg=SURFACE0 for the separator.
-        # If we want Path to be SURFACE0, that matches.
-
-        # Draw current path
-        screen.cursor.fg = PATH_FG
-        screen.cursor.bg = PATH_BG
-        screen.draw(f" {cwd} ")
-
-        # Draw separator from Path to Tabs (Default BG)
-        # The tabs use 'default_bg' which is usually opaque or transparent.
-        # We need to transition from PATH_BG to Default.
-        default_bg = as_rgb(int(draw_data.default_bg))
-
-        screen.cursor.fg = PATH_BG
-        screen.cursor.bg = default_bg
-        screen.draw(SEPARATOR_SYMBOL)
-
-        # Add a space after
-        screen.draw(" ")
-
-        screen.cursor.fg, screen.cursor.bg = fg, bg
-        return screen.cursor.x
-    except Exception as e:
-        print(f"tab_bar.py error in _draw_session_info: {e}", file=sys.stderr)
+    except Exception:
+        # Silently fail to avoid stderr output that could show as red text
         return 0
 
 
@@ -374,6 +304,12 @@ def _draw_left_status(
     is_last: bool,
     extra_data: ExtraData,
 ) -> int:
+    # For the first tab, cursor.x may have been advanced by mode/session drawing
+    # For subsequent tabs, we need to check from the tab's starting position
+    # Use 'before' as the starting position for this tab
+    if index > 1:
+        screen.cursor.x = before
+
     if screen.cursor.x >= screen.columns - right_status_length:
         return screen.cursor.x
 
@@ -576,7 +512,7 @@ def get_mem_cells() -> List[Tuple[int, str]]:
 
 
 timer_id = None
-right_status_length = -1
+right_status_length = 50  # Initial estimate, will be recalculated on first draw
 
 
 def draw_tab(
@@ -597,68 +533,68 @@ def draw_tab(
 
         screen.cursor.x = before  # Initialize cursor position for this tab
 
-        mode_color, _ = _get_mode_color()
-        clock = datetime.now().strftime("%H:%M")
-
-        # Layout:
-        # [Soft Sep] [Metrics (BG=CRUST)] [Hard Sep] [User (BG=SURFACE0)] [Hard Sep] [Clock (BG=Mode)]
-
-        # Colors
-        BG_METRICS = CRUST
-        BG_USER = SURFACE0
-        BG_CLOCK = mode_color
-
-        FG_METRICS = TEXT
-        FG_USER = mode_color
-        FG_CLOCK = CRUST  # Contrast on bright mode color
-
-        default_bg = as_rgb(int(draw_data.default_bg))
-
-        # Metrics content
-        metrics_content = []
-        cpu = get_cpu_cells()  # list of (color, text)
-        mem = get_mem_cells()
-        bat = get_battery_cells()
-
-        # List of (fg, bg, text)
+        # Only calculate metrics and build cells for the last tab to avoid redundant computation
+        # This prevents reading /proc/stat, /proc/meminfo, battery files N times per second
         cells = []
+        if is_last:
+            mode_color, _ = _get_mode_color()
+            clock = datetime.now().strftime("%H:%M")
 
-        # 1. Start with Soft Separator (backslash variant)
-        cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER))
+            # Layout:
+            # [Soft Sep] [Metrics (BG=CRUST)] [Hard Sep] [User (BG=SURFACE0)] [Hard Sep] [Clock (BG=Mode)]
 
-        # Add Metrics
-        cells.append((FG_METRICS, BG_METRICS, RIGHT_SOFT_DIVIDER + " "))
+            # Colors
+            BG_METRICS = CRUST
+            BG_USER = SURFACE0
+            BG_CLOCK = mode_color
 
-        # CPU - pad to fixed width
-        for color, text in cpu:
-            padded_text = text.ljust(5)  # " 45%" -> " 45%  "
-            cells.append((color, BG_METRICS, padded_text + " "))
-        # Mem - pad to fixed width
-        for color, text in mem:
-            padded_text = text.ljust(5)  # " 67%" -> " 67%  "
-            cells.append((color, BG_METRICS, padded_text + " "))
-        # Bat - pad to fixed width
-        for color, text in bat:
-            padded_text = text.ljust(6)  # "󰁹 85%" -> "󰁹 85%   "
-            cells.append((color, BG_METRICS, padded_text + " "))
+            FG_METRICS = TEXT
+            FG_USER = mode_color
+            FG_CLOCK = CRUST  # Contrast on bright mode color
 
-        # 2. Transition to User
-        cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+            default_bg = as_rgb(int(draw_data.default_bg))
 
-        # User content
-        user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
-        cells.append((FG_USER, BG_USER, f" {user_host} "))
+            # Metrics content - only fetch when we're actually going to draw
+            cpu = get_cpu_cells()  # list of (color, text)
+            mem = get_mem_cells()
+            bat = get_battery_cells()
 
-        # 3. Transition to Clock
-        cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
+            # 1. Start with Soft Separator (backslash variant)
+            cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER))
 
-        # Clock content
-        cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
+            # Add Metrics
+            cells.append((FG_METRICS, BG_METRICS, RIGHT_SOFT_DIVIDER + " "))
 
-        # Calculate right status length
-        right_status_length = 0
-        for _, _, text in cells:
-            right_status_length += wcswidth(str(text))
+            # CPU - pad to fixed width
+            for color, text in cpu:
+                padded_text = text.ljust(5)  # " 45%" -> " 45%  "
+                cells.append((color, BG_METRICS, padded_text + " "))
+            # Mem - pad to fixed width
+            for color, text in mem:
+                padded_text = text.ljust(5)  # " 67%" -> " 67%  "
+                cells.append((color, BG_METRICS, padded_text + " "))
+            # Bat - pad to fixed width
+            for color, text in bat:
+                padded_text = text.ljust(6)  # "󰁹 85%" -> "󰁹 85%   "
+                cells.append((color, BG_METRICS, padded_text + " "))
+
+            # 2. Transition to User
+            cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+
+            # User content
+            user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
+            cells.append((FG_USER, BG_USER, f" {user_host} "))
+
+            # 3. Transition to Clock
+            cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
+
+            # Clock content
+            cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
+
+            # Calculate right status length
+            right_status_length = 0
+            for _, _, text in cells:
+                right_status_length += wcswidth(str(text))
 
         # Draw left side components - only for first tab to avoid duplicates
         if index == 1:
@@ -686,6 +622,6 @@ def draw_tab(
         )
         _draw_right_status(screen, is_last, cells)
         return screen.cursor.x
-    except Exception as e:
-        print(f"tab_bar.py error in draw_tab: {e}", file=sys.stderr)
+    except Exception:
+        # Silently fail to avoid stderr output that could show as red text
         return screen.cursor.x
