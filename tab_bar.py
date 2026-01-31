@@ -311,8 +311,9 @@ def _draw_left_status(
         screen.cursor.x = before
 
     # Allow tabs to draw if there's reasonable space
-    # Don't be too restrictive - the right section can adjust its positioning
-    if screen.cursor.x >= screen.columns - 30:  # Reserve at least 30 chars for right section
+    # Use actual right_status_length from last frame if available, otherwise use safe minimum
+    reserved = right_status_length if right_status_length > 0 else 50
+    if screen.cursor.x >= screen.columns - reserved:
         return screen.cursor.x
 
     # Save current colors
@@ -355,7 +356,7 @@ def _draw_right_status(screen: Screen, is_last: bool, cells: list) -> int:
     if not is_last:
         return 0
     draw_attributed_string(Formatter.reset, screen)
-    
+
     # Ensure we don't position the right status off-screen
     # If right_status_length is too large, adjust it to fit
     if right_status_length > screen.columns:
@@ -522,6 +523,7 @@ def get_mem_cells() -> List[Tuple[int, str]]:
 
 timer_id = None
 right_status_length = 50  # Initial estimate, will be recalculated on first draw
+_right_status_cells = []  # Cache for right status cells to avoid redundant computation
 
 
 def draw_tab(
@@ -537,17 +539,17 @@ def draw_tab(
     try:
         global timer_id
         global right_status_length
+        global _right_status_cells
         if timer_id is None:
             timer_id = add_timer(_redraw_tab_bar, REFRESH_TIME, True)
 
-        # Ensure right_status_length is calculated before drawing any tabs
-        # This must happen for ALL tabs, not just the last one
-        if index == 1:  # Only calculate once, for the first tab
+        screen.cursor.x = before  # Initialize cursor position for this tab
+
+        # Calculate right status cells once for the first tab to avoid redundant computation
+        # This ensures all tabs use the same right_status_length for positioning
+        if index == 1:
             mode_color, _ = _get_mode_color()
             clock = datetime.now().strftime("%H:%M")
-
-            # Layout:
-            # [Soft Sep] [Metrics (BG=CRUST)] [Hard Sep] [User (BG=SURFACE0)] [Hard Sep] [Clock (BG=Mode)]
 
             # Colors
             BG_METRICS = CRUST
@@ -556,169 +558,40 @@ def draw_tab(
 
             FG_METRICS = TEXT
             FG_USER = mode_color
-            FG_CLOCK = CRUST  # Contrast on bright mode color
+            FG_CLOCK = CRUST
 
             default_bg = as_rgb(int(draw_data.default_bg))
 
-            temp_cells = []
-            
-            # 1. Start with Soft Separator (backslash variant) and space
-            temp_cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
-
-            # Estimate metrics section length (we'll use actual values for last tab)
+            # Metrics content
             cpu = get_cpu_cells()
             mem = get_mem_cells()
             bat = get_battery_cells()
 
-            # CPU - pad to fixed width
-            for color, text in cpu:
-                padded_text = text.ljust(5)  # " 45%" -> " 45%  "
-                temp_cells.append((color, BG_METRICS, padded_text + " "))
-            # Mem - pad to fixed width
-            for color, text in mem:
-                padded_text = text.ljust(5)  # " 67%" -> " 67%  "
-                temp_cells.append((color, BG_METRICS, padded_text + " "))
-            # Bat - pad to fixed width
-            for color, text in bat:
-                padded_text = text.ljust(6)  # "󰁹 85%" -> "󰁹 85%   "
-                temp_cells.append((color, BG_METRICS, padded_text + " "))
-
-            # 2. Transition to User
-            temp_cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
-
-            # User content
-            user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
-            temp_cells.append((FG_USER, BG_USER, f" {user_host} "))
-
-            # 3. Transition to Clock
-            temp_cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
-
-            # Clock content
-            temp_cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
-
-            # Calculate right status length
-            right_status_length = 0
-            for _, _, text in temp_cells:
-                right_status_length += wcswidth(str(text))
-
-        screen.cursor.x = before  # Initialize cursor position for this tab
-
-        # Only calculate metrics and build cells for the last tab to avoid redundant computation
-        # This prevents reading /proc/stat, /proc/meminfo, battery files N times per second
-        cells = []
-        if is_last:
-            # Calculate right status length if not set or if this is the last tab (to get accurate metrics)
-            mode_color, _ = _get_mode_color()
-            clock = datetime.now().strftime("%H:%M")
-
-            # Layout:
-            # [Soft Sep] [Metrics (BG=CRUST)] [Hard Sep] [User (BG=SURFACE0)] [Hard Sep] [Clock (BG=Mode)]
-
-            # Colors
-            BG_METRICS = CRUST
-            BG_USER = SURFACE0
-            BG_CLOCK = mode_color
-
-            FG_METRICS = TEXT
-            FG_USER = mode_color
-            FG_CLOCK = CRUST  # Contrast on bright mode color
-
-            default_bg = as_rgb(int(draw_data.default_bg))
-
-            temp_cells = []
-            
-            # 1. Start with Soft Separator (backslash variant) and space
-            temp_cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
-
-            if is_last:
-                # Only fetch actual metrics for the last tab to avoid redundant computation
-                cpu = get_cpu_cells()  # list of (color, text)
-                mem = get_mem_cells()
-                bat = get_battery_cells()
-
-                # CPU - pad to fixed width
-                for color, text in cpu:
-                    padded_text = text.ljust(5)  # " 45%" -> " 45%  "
-                    temp_cells.append((color, BG_METRICS, padded_text + " "))
-                # Mem - pad to fixed width
-                for color, text in mem:
-                    padded_text = text.ljust(5)  # " 67%" -> " 67%  "
-                    temp_cells.append((color, BG_METRICS, padded_text + " "))
-                # Bat - pad to fixed width
-                for color, text in bat:
-                    padded_text = text.ljust(6)  # "󰁹 85%" -> "󰁹 85%   "
-                    temp_cells.append((color, BG_METRICS, padded_text + " "))
-            else:
-                # For non-last tabs, estimate the metrics section length
-                temp_cells.append((FG_METRICS, BG_METRICS, "        "))  # CPU estimate
-                temp_cells.append((FG_METRICS, BG_METRICS, "        "))  # MEM estimate  
-                temp_cells.append((FG_METRICS, BG_METRICS, "         "))  # BAT estimate
-
-            # 2. Transition to User
-            temp_cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
-
-            # User content
-            user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
-            temp_cells.append((FG_USER, BG_USER, f" {user_host} "))
-
-            # 3. Transition to Clock
-            temp_cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
-
-            # Clock content
-            temp_cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
-
-            # Calculate right status length
-            right_status_length = 0
-            for _, _, text in temp_cells:
-                right_status_length += wcswidth(str(text))
-
-        # Only calculate metrics and build cells for the last tab to avoid redundant computation
-        # This prevents reading /proc/stat, /proc/meminfo, battery files N times per second
-        cells = []
-        if is_last:
-            mode_color, _ = _get_mode_color()
-            clock = datetime.now().strftime("%H:%M")
-
-            # Layout:
-            # [Soft Sep] [Metrics (BG=CRUST)] [Hard Sep] [User (BG=SURFACE0)] [Hard Sep] [Clock (BG=Mode)]
-
-            # Colors
-            BG_METRICS = CRUST
-            BG_USER = SURFACE0
-            BG_CLOCK = mode_color
-
-            FG_METRICS = TEXT
-            FG_USER = mode_color
-            FG_CLOCK = CRUST  # Contrast on bright mode color
-
-            default_bg = as_rgb(int(draw_data.default_bg))
-
-            # Metrics content - only fetch when we're actually going to draw
-            cpu = get_cpu_cells()  # list of (color, text)
-            mem = get_mem_cells()
-            bat = get_battery_cells()
+            cells = []
 
             # 1. Start with Soft Separator (backslash variant) and space
             cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
 
             # CPU - pad to fixed width
             for color, text in cpu:
-                padded_text = text.ljust(5)  # " 45%" -> " 45%  "
+                padded_text = text.ljust(5)
                 cells.append((color, BG_METRICS, padded_text + " "))
             # Mem - pad to fixed width
             for color, text in mem:
-                padded_text = text.ljust(5)  # " 67%" -> " 67%  "
+                padded_text = text.ljust(5)
                 cells.append((color, BG_METRICS, padded_text + " "))
             # Bat - pad to fixed width
             for color, text in bat:
-                padded_text = text.ljust(6)  # "󰁹 85%" -> "󰁹 85%   "
+                padded_text = text.ljust(6)
                 cells.append((color, BG_METRICS, padded_text + " "))
 
             # 2. Transition to User
             cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
 
             # User content
-            user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
+            user_host = (
+                f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
+            )
             cells.append((FG_USER, BG_USER, f" {user_host} "))
 
             # 3. Transition to Clock
@@ -727,10 +600,73 @@ def draw_tab(
             # Clock content
             cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
 
-            # Calculate right status length
+            # Cache the cells and calculate length
+            _right_status_cells = cells
             right_status_length = 0
             for _, _, text in cells:
                 right_status_length += wcswidth(str(text))
+
+        # Update cells for the last tab (to get fresh metrics for actual drawing)
+        if is_last:
+            mode_color, _ = _get_mode_color()
+            clock = datetime.now().strftime("%H:%M")
+
+            # Colors
+            BG_METRICS = CRUST
+            BG_USER = SURFACE0
+            BG_CLOCK = mode_color
+
+            FG_METRICS = TEXT
+            FG_USER = mode_color
+            FG_CLOCK = CRUST
+
+            default_bg = as_rgb(int(draw_data.default_bg))
+
+            cells = []
+
+            # Metrics content - fetch fresh metrics for drawing
+            cpu = get_cpu_cells()
+            mem = get_mem_cells()
+            bat = get_battery_cells()
+
+            # 1. Start with Soft Separator (backslash variant) and space
+            cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
+
+            # CPU - pad to fixed width
+            for color, text in cpu:
+                padded_text = text.ljust(5)
+                cells.append((color, BG_METRICS, padded_text + " "))
+            # Mem - pad to fixed width
+            for color, text in mem:
+                padded_text = text.ljust(5)
+                cells.append((color, BG_METRICS, padded_text + " "))
+            # Bat - pad to fixed width
+            for color, text in bat:
+                padded_text = text.ljust(6)
+                cells.append((color, BG_METRICS, padded_text + " "))
+
+            # 2. Transition to User
+            cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+
+            # User content
+            user_host = (
+                f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
+            )
+            cells.append((FG_USER, BG_USER, f" {user_host} "))
+
+            # 3. Transition to Clock
+            cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
+
+            # Clock content
+            cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
+
+            # Recalculate right_status_length with fresh cells
+            right_status_length = 0
+            for _, _, text in cells:
+                right_status_length += wcswidth(str(text))
+        else:
+            # Use cached cells for non-last tabs
+            cells = _right_status_cells
 
         # Draw left side components - only for first tab to avoid duplicates
         if index == 1:
