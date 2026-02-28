@@ -294,6 +294,18 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
         return 0
 
 
+def _calculate_tab_width(title: str, max_title_length: int) -> int:
+    """Calculate the visual width of a tab including its separator"""
+    # Truncate title if needed
+    if wcswidth(title) > max_title_length:
+        display_title = title[:max_title_length-1] + "…"
+    else:
+        display_title = title
+    
+    # Tab width = title + " 󰿟 " (space, separator, space)
+    return wcswidth(display_title) + wcswidth(" " + SOFT_SEPARATOR_SYMBOL + " ")
+
+
 def _draw_left_status(
     draw_data: DrawData,
     screen: Screen,
@@ -303,6 +315,7 @@ def _draw_left_status(
     index: int,
     is_last: bool,
     extra_data: ExtraData,
+    reserved_right: int = 0,
 ) -> int:
     # For the first tab, cursor.x may have been advanced by mode/session drawing
     # For subsequent tabs, we need to check from the tab's starting position
@@ -310,10 +323,12 @@ def _draw_left_status(
     if index > 1:
         screen.cursor.x = before
 
-    # Allow tabs to draw if there's reasonable space
-    # Use actual right_status_length from last frame if available, otherwise use safe minimum
-    reserved = right_status_length if right_status_length > 0 else 50
-    if screen.cursor.x >= screen.columns - reserved:
+    # Calculate available space
+    available = screen.columns - screen.cursor.x
+    
+    # If we don't have enough space for this tab plus reserved right section, skip
+    tab_width = _calculate_tab_width(tab.title, max_title_length)
+    if available < tab_width + reserved_right:
         return screen.cursor.x
 
     # Save current colors
@@ -526,6 +541,23 @@ right_status_length = 50  # Initial estimate, will be recalculated on first draw
 _right_status_cells = []  # Cache for right status cells to avoid redundant computation
 
 
+def _calculate_left_side_width(draw_data, extra_data, tabs) -> int:
+    """Calculate the total width of left side (mode + session + all tabs)"""
+    # Mode indicator: " 󰘳 MODE " ≈ 10 chars
+    mode_width = 10
+    
+    # Session info: varies, estimate 30 chars for git + process + separators
+    session_width = 30
+    
+    # Calculate width of all tabs
+    tab_widths = 0
+    max_len = opts.tab_title_max_length
+    for tab in tabs:
+        tab_widths += _calculate_tab_width(tab.title, max_len)
+    
+    return mode_width + session_width + tab_widths
+
+
 def draw_tab(
     draw_data: DrawData,
     screen: Screen,
@@ -545,8 +577,11 @@ def draw_tab(
 
         screen.cursor.x = before  # Initialize cursor position for this tab
 
-        # Calculate right status cells once for the first tab to avoid redundant computation
-        # This ensures all tabs use the same right_status_length for positioning
+        # Get all tabs to calculate actual left side width
+        boss = get_boss()
+        all_tabs = boss.active_tab_manager.tabs if boss and boss.active_tab_manager else []
+
+        # Calculate right status cells for first tab (determines layout for all tabs)
         if index == 1:
             mode_color, _ = _get_mode_color()
             clock = datetime.now().strftime("%H:%M")
@@ -562,51 +597,71 @@ def draw_tab(
 
             default_bg = as_rgb(int(draw_data.default_bg))
 
-            # Metrics content
-            cpu = get_cpu_cells()
-            mem = get_mem_cells()
-            bat = get_battery_cells()
-
-            cells = []
-
-            # 1. Start with Soft Separator (backslash variant) and space
-            cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
-
-            # CPU - pad to fixed width
-            for color, text in cpu:
-                padded_text = text.ljust(5)
-                cells.append((color, BG_METRICS, padded_text + " "))
-            # Mem - pad to fixed width
-            for color, text in mem:
-                padded_text = text.ljust(5)
-                cells.append((color, BG_METRICS, padded_text + " "))
-            # Bat - pad to fixed width
-            for color, text in bat:
-                padded_text = text.ljust(6)
-                cells.append((color, BG_METRICS, padded_text + " "))
-
-            # 2. Transition to User
-            cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
-
-            # User content
+            # Calculate essential width (user + clock only, without metrics)
             user_host = (
                 f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
             )
+            essential_cells = [
+                (BG_USER, default_bg, RIGHT_DIVIDER),
+                (FG_USER, BG_USER, f" {user_host} "),
+                (BG_CLOCK, BG_USER, RIGHT_DIVIDER),
+                (FG_CLOCK, BG_CLOCK, f"  {clock} "),
+            ]
+            essential_width = sum(wcswidth(str(t)) for _, _, t in essential_cells)
+            
+            # Calculate actual left side width
+            left_width = _calculate_left_side_width(draw_data, extra_data, all_tabs)
+            
+            # Calculate width if we include metrics
+            metrics_width = wcswidth(RIGHT_SOFT_DIVIDER + " ") + 5 + 5 + 6 + wcswidth(RIGHT_DIVIDER)
+            full_width = essential_width + metrics_width
+            
+            # Determine if we have space for metrics
+            # We need: left_width + full_width < screen.columns - margin
+            include_metrics = (left_width + full_width) < (screen.columns - 5)
+
+            cells = []
+
+            if include_metrics:
+                # 1. Start with Soft Separator (backslash variant) and space
+                cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
+
+                # Metrics content
+                cpu = get_cpu_cells()
+                mem = get_mem_cells()
+                bat = get_battery_cells()
+
+                # CPU - pad to fixed width
+                for color, text in cpu:
+                    padded_text = text.ljust(5)
+                    cells.append((color, BG_METRICS, padded_text + " "))
+                # Mem - pad to fixed width
+                for color, text in mem:
+                    padded_text = text.ljust(5)
+                    cells.append((color, BG_METRICS, padded_text + " "))
+                # Bat - pad to fixed width
+                for color, text in bat:
+                    padded_text = text.ljust(6)
+                    cells.append((color, BG_METRICS, padded_text + " "))
+
+                # 2. Transition to User
+                cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+            else:
+                # No space for metrics, just essential with soft separator
+                cells.append((BG_USER, default_bg, RIGHT_SOFT_DIVIDER + " "))
+
+            # 3. Add User and Clock (essential content)
             cells.append((FG_USER, BG_USER, f" {user_host} "))
-
-            # 3. Transition to Clock
             cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
-
-            # Clock content
             cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
 
-            # Cache the cells and calculate length
+            # Cache cells and calculate length
             _right_status_cells = cells
             right_status_length = 0
             for _, _, text in cells:
                 right_status_length += wcswidth(str(text))
 
-        # Update cells for the last tab (to get fresh metrics for actual drawing)
+        # Update cells for the last tab (to get fresh metrics/time for actual drawing)
         if is_last:
             mode_color, _ = _get_mode_color()
             clock = datetime.now().strftime("%H:%M")
@@ -622,42 +677,48 @@ def draw_tab(
 
             default_bg = as_rgb(int(draw_data.default_bg))
 
-            cells = []
-
-            # Metrics content - fetch fresh metrics for drawing
-            cpu = get_cpu_cells()
-            mem = get_mem_cells()
-            bat = get_battery_cells()
-
-            # 1. Start with Soft Separator (backslash variant) and space
-            cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
-
-            # CPU - pad to fixed width
-            for color, text in cpu:
-                padded_text = text.ljust(5)
-                cells.append((color, BG_METRICS, padded_text + " "))
-            # Mem - pad to fixed width
-            for color, text in mem:
-                padded_text = text.ljust(5)
-                cells.append((color, BG_METRICS, padded_text + " "))
-            # Bat - pad to fixed width
-            for color, text in bat:
-                padded_text = text.ljust(6)
-                cells.append((color, BG_METRICS, padded_text + " "))
-
-            # 2. Transition to User
-            cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
-
-            # User content
+            # Re-check if we should include metrics (based on current left width)
+            left_width = _calculate_left_side_width(draw_data, extra_data, all_tabs)
             user_host = (
                 f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
             )
+            essential_cells = [
+                (BG_USER, default_bg, RIGHT_DIVIDER),
+                (FG_USER, BG_USER, f" {user_host} "),
+                (BG_CLOCK, BG_USER, RIGHT_DIVIDER),
+                (FG_CLOCK, BG_CLOCK, f"  {clock} "),
+            ]
+            essential_width = sum(wcswidth(str(t)) for _, _, t in essential_cells)
+            metrics_width = wcswidth(RIGHT_SOFT_DIVIDER + " ") + 5 + 5 + 6 + wcswidth(RIGHT_DIVIDER)
+            full_width = essential_width + metrics_width
+            include_metrics = (left_width + full_width) < (screen.columns - 5)
+
+            cells = []
+
+            if include_metrics:
+                # Fetch fresh metrics for drawing
+                cpu = get_cpu_cells()
+                mem = get_mem_cells()
+                bat = get_battery_cells()
+
+                cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
+
+                for color, text in cpu:
+                    padded_text = text.ljust(5)
+                    cells.append((color, BG_METRICS, padded_text + " "))
+                for color, text in mem:
+                    padded_text = text.ljust(5)
+                    cells.append((color, BG_METRICS, padded_text + " "))
+                for color, text in bat:
+                    padded_text = text.ljust(6)
+                    cells.append((color, BG_METRICS, padded_text + " "))
+
+                cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+            else:
+                cells.append((BG_USER, default_bg, RIGHT_SOFT_DIVIDER + " "))
+
             cells.append((FG_USER, BG_USER, f" {user_host} "))
-
-            # 3. Transition to Clock
             cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
-
-            # Clock content
             cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
 
             # Recalculate right_status_length with fresh cells
@@ -682,6 +743,7 @@ def draw_tab(
             screen.cursor.bold = orig_bold
             screen.cursor.italic = orig_italic
 
+        # Draw tab with reserved space for right status
         _draw_left_status(
             draw_data,
             screen,
@@ -691,8 +753,13 @@ def draw_tab(
             index,
             is_last,
             extra_data,
+            reserved_right=right_status_length,
         )
-        _draw_right_status(screen, is_last, cells)
+        
+        # Only draw right status on last tab
+        if is_last:
+            _draw_right_status(screen, is_last, cells)
+            
         return screen.cursor.x
     except Exception:
         # Silently fail to avoid stderr output that could show as red text
