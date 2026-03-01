@@ -155,8 +155,16 @@ def _draw_mode_indicator(screen: Screen, index: int, tab=None, draw_data=None) -
         return 0
 
 
+_cached_git_branch = ""
+_last_git_check = 0.0
+
 def _get_git_branch() -> str:
-    """Get current git branch name"""
+    """Get current git branch name with caching"""
+    global _cached_git_branch, _last_git_check
+    now = time.monotonic()
+    if now - _last_git_check < 3.0:  # Cache for 3 seconds
+        return _cached_git_branch
+
     try:
         # Get current working directory
         boss = get_boss()
@@ -165,52 +173,60 @@ def _get_git_branch() -> str:
         else:
             cwd = os.getcwd()
 
-        # Check if we're in a git repo
-        git_dir = os.path.join(cwd, ".git")
-        if not os.path.exists(git_dir):
+        if not cwd or not os.path.exists(cwd):
+            _cached_git_branch = ""
+            _last_git_check = now
             return ""
 
-        # Try to get branch name
+        # Check if we're in a git repo
+        # Use git rev-parse instead of checking .git dir manually for robustness
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=0.5, # Very short timeout
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
-            return branch if branch and branch != "HEAD" else ""
-        return ""
-    except (
-        subprocess.TimeoutExpired,
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-    ):
-        return ""
+            _cached_git_branch = branch if branch and branch != "HEAD" else ""
+        else:
+            _cached_git_branch = ""
+    except Exception:
+        _cached_git_branch = ""
+    
+    _last_git_check = now
+    return _cached_git_branch
 
+
+_cached_process_name = "shell"
+_last_process_check = 0.0
 
 def _get_process_name() -> str:
-    """Get current process name"""
+    """Get current process name with caching"""
+    global _cached_process_name, _last_process_check
+    now = time.monotonic()
+    if now - _last_process_check < 2.0:  # Cache for 2 seconds
+        return _cached_process_name
+
     try:
         boss = get_boss()
         if boss and boss.active_tab and boss.active_tab.active_window:
+            window = boss.active_tab.active_window
             # Try to get the foreground process name
-            cwd = boss.active_tab.active_window.cwd_of_child or ""
-            if cwd:
-                # Get the current shell or process from environment
+            # Kitty windows have 'child_name' which is often the shell/process
+            process = window.child_name
+            if process:
+                _cached_process_name = process
+            else:
+                # Fallback to shell from env
                 shell = os.getenv("SHELL", "")
-                if "zsh" in shell:
-                    return "zsh"
-                elif "bash" in shell:
-                    return "bash"
-                elif "fish" in shell:
-                    return "fish"
-                else:
-                    return os.path.basename(shell) if shell else "shell"
-        return "shell"
+                _cached_process_name = os.path.basename(shell) if shell else "shell"
     except Exception:
-        return "shell"
+        pass
+    
+    _last_process_check = now
+    return _cached_process_name
 
 
 def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> int:
@@ -294,16 +310,46 @@ def _draw_session_info(screen: Screen, index: int, tab=None, draw_data=None) -> 
         return 0
 
 
+def _wcsljust(s: str, width: int) -> str:
+    """Left justify a string based on its visual width (wcswidth)"""
+    w = wcswidth(s)
+    if w >= width:
+        return s
+    return s + " " * (width - w)
+
+
 def _calculate_tab_width(title: str, max_title_length: int) -> int:
     """Calculate the visual width of a tab including its separator"""
     # Truncate title if needed
-    if wcswidth(title) > max_title_length:
-        display_title = title[:max_title_length-1] + "…"
+    w = wcswidth(title)
+    if w > max_title_length:
+        display_title = title
+        while wcswidth(display_title) > max(1, max_title_length - 1):
+            display_title = display_title[:-1]
+        display_title = display_title + "…"
     else:
         display_title = title
     
     # Tab width = title + " 󰿟 " (space, separator, space)
     return wcswidth(display_title) + wcswidth(" " + SOFT_SEPARATOR_SYMBOL + " ")
+
+
+def _truncate_to_width(s: str, width: int) -> str:
+    """Truncate a string to a specific visual width"""
+    if width <= 0:
+        return ""
+    if wcswidth(s) <= width:
+        return s
+    res = ""
+    curr_w = 0
+    for char in s:
+        w = wcswidth(char)
+        if w < 0: w = 1 # Fallback for unknown chars
+        if curr_w + w > width:
+            break
+        res += char
+        curr_w += w
+    return res
 
 
 def _draw_left_status(
@@ -317,18 +363,24 @@ def _draw_left_status(
     extra_data: ExtraData,
     reserved_right: int = 0,
 ) -> int:
-    # For the first tab, cursor.x may have been advanced by mode/session drawing
-    # For subsequent tabs, we need to check from the tab's starting position
-    # Use 'before' as the starting position for this tab
-    if index > 1:
-        screen.cursor.x = before
+    # IMPORTANT: We ignore Kitty's 'before' entirely and use screen.cursor.x
+    # which has been set by draw_tab to follow the previous element sequentially.
 
-    # Calculate available space
-    available = screen.columns - screen.cursor.x
+    # The maximum position we can draw to for the left side
+    # We leave a buffer of 1 cell for safety
+    max_x = max(0, screen.columns - reserved_right - 1)
     
-    # If we don't have enough space for this tab plus reserved right section, skip
-    tab_width = _calculate_tab_width(tab.title, max_title_length)
-    if available < tab_width + reserved_right:
+    # If the cursor is already past the maximum allowed position, stop drawing
+    if screen.cursor.x >= max_x:
+        return screen.cursor.x
+
+    # Calculate available space for this tab's title
+    # We need room for: title + " 󰿟 " (3 cells)
+    needed_for_separator = wcswidth(" " + SOFT_SEPARATOR_SYMBOL + " ")
+    available_for_title = max_x - screen.cursor.x - needed_for_separator
+    
+    if available_for_title < 1:
+        # Not even room for one character. Skip.
         return screen.cursor.x
 
     # Save current colors
@@ -338,13 +390,12 @@ def _draw_left_status(
     default_bg = as_rgb(int(draw_data.default_bg))
     screen.cursor.bg = default_bg
 
-    # Get and truncate title based on cell width using config value
+    # Get and truncate title
     title = tab.title
-    max_len = opts.tab_title_max_length
-    if wcswidth(title) > max_len:
-        while wcswidth(title) > max_len - 1:
-            title = title[:-1]
-        title = title + "…"
+    trunc_len = min(max_title_length, available_for_title)
+    
+    if wcswidth(title) > trunc_len:
+        title = _truncate_to_width(title, max(1, trunc_len - 1)) + "…"
 
     # Tab styling and indicator
     if tab.is_active:
@@ -354,45 +405,44 @@ def _draw_left_status(
         screen.cursor.fg = OVERLAY0
         screen.draw(title)
 
-    # Add separator to the right of every tab
-    # The user's desired layout has "tab1 󰿟 tab2 󰿟 tab3 󰿟"
-    # Reset color for separator so it doesn't inherit active tab color
-    screen.cursor.fg = OVERLAY0
-    screen.draw(" " + SOFT_SEPARATOR_SYMBOL + " ")
+    # Add separator if we have room
+    if screen.cursor.x + needed_for_separator <= max_x:
+        screen.cursor.fg = OVERLAY0
+        screen.draw(" " + SOFT_SEPARATOR_SYMBOL + " ")
 
     # Restore original colors
     screen.cursor.fg, screen.cursor.bg = fg, bg
 
-    end = screen.cursor.x
-    return end
+    return screen.cursor.x
 
 
 def _draw_right_status(screen: Screen, is_last: bool, cells: list) -> int:
     if not is_last:
         return 0
+    
+    # Reset formatting
     draw_attributed_string(Formatter.reset, screen)
 
-    # Ensure we don't position the right status off-screen
-    # If right_status_length is too large, adjust it to fit
-    if right_status_length > screen.columns:
-        # Content is too wide, but we'll still try to draw what we can
-        screen.cursor.x = 0
-    else:
-        screen.cursor.x = screen.columns - right_status_length
+    # Note: Cursor position is already set by caller to ensure forward movement
 
-    # cells is a list of (fg, bg, text)
-    # We iterate and draw.
-    # Note: The 'cells' list must be prepared such that hard dividers are separate items
-    # or we handle them here.
-    # Given the complexity, let's assume 'cells' contains EVERYTHING to be drawn,
-    # including separators as explicit items with their own fg/bg.
-
+    # Draw each cell defensively
     for fg, bg, text in cells:
-        screen.cursor.fg = fg
-        screen.cursor.bg = bg
-        screen.draw(text)
+        try:
+            # Only draw if we are still on screen
+            if screen.cursor.x < screen.columns:
+                screen.cursor.fg = fg
+                screen.cursor.bg = bg
+                
+                # Truncate text if it would go off-screen
+                avail = screen.columns - screen.cursor.x
+                if wcswidth(text) > avail:
+                    text = _truncate_to_width(text, avail)
+                
+                if text:
+                    screen.draw(text)
+        except:
+            continue
 
-    screen.cursor.bg = 0
     return screen.cursor.x
 
 
@@ -537,21 +587,48 @@ def get_mem_cells() -> List[Tuple[int, str]]:
 
 
 timer_id = None
-right_status_length = 50  # Initial estimate, will be recalculated on first draw
+right_status_length = 0  # Initial estimate, will be recalculated on first draw
+_tab_bar_current_x = 0  # Global tracker for sequential drawing
 _right_status_cells = []  # Cache for right status cells to avoid redundant computation
+_right_status_len_cache = 0  # Global stable width for a draw cycle
 
 
 def _calculate_left_side_width(draw_data, extra_data, tabs) -> int:
     """Calculate the total width of left side (mode + session + all tabs)"""
-    # Mode indicator: " 󰘳 MODE " ≈ 10 chars
-    mode_width = 10
+    # Get current mode for width
+    _, mode_name = _get_mode_color()
+    # " {icon} {mode_name} " + SEPARATOR_SYMBOL
+    mode_width = wcswidth(f"  {mode_name} ") + wcswidth(SEPARATOR_SYMBOL)
     
-    # Session info: varies, estimate 30 chars for git + process + separators
-    session_width = 30
+    # Session info: git branch + process name
+    git_branch = _get_git_branch()
+    process_name = _get_process_name()
     
+    session_width = 0
+    if git_branch:
+        # Truncate git branch like in _draw_session_info
+        MAX_BRANCH_LEN = 25
+        if wcswidth(git_branch) > MAX_BRANCH_LEN:
+            display_branch = git_branch[:MAX_BRANCH_LEN-1] + "…"
+        else:
+            display_branch = git_branch
+        # "  {branch} " + SEPARATOR_SYMBOL
+        session_width += wcswidth(f"  {display_branch} ") + wcswidth(SEPARATOR_SYMBOL)
+    else:
+        # Just separator from Mode to Process
+        session_width += wcswidth(SEPARATOR_SYMBOL)
+        
+    # " {icon}{process_name} " + SEPARATOR_SYMBOL + " "
+    session_width += wcswidth(f"  {process_name} ") + wcswidth(SEPARATOR_SYMBOL) + 1
+    
+    # If we only want the fixed header width
+    if not tabs:
+        return mode_width + session_width
+        
     # Calculate width of all tabs
     tab_widths = 0
-    max_len = opts.tab_title_max_length
+    # Use a conservative max length if not provided
+    max_len = getattr(opts, "tab_title_max_length", 32)
     for tab in tabs:
         tab_widths += _calculate_tab_width(tab.title, max_len)
     
@@ -572,184 +649,137 @@ def draw_tab(
         global timer_id
         global right_status_length
         global _right_status_cells
+        global _right_status_len_cache
+        global _tab_bar_current_x
+
         if timer_id is None:
             timer_id = add_timer(_redraw_tab_bar, REFRESH_TIME, True)
 
-        screen.cursor.x = before  # Initialize cursor position for this tab
+        # Initialize or update sequential tracker
+        if index == 1:
+            _tab_bar_current_x = 0
+            right_status_length = 0
+        
+        # Always set cursor to where we finished the last element
+        screen.cursor.x = _tab_bar_current_x
 
         # Get all tabs to calculate actual left side width
         boss = get_boss()
-        all_tabs = boss.active_tab_manager.tabs if boss and boss.active_tab_manager else []
+        if not boss or not boss.active_tab_manager:
+            return screen.cursor.x
+            
+        all_tabs = boss.active_tab_manager.tabs
 
         # Calculate right status cells for first tab (determines layout for all tabs)
-        if index == 1:
-            mode_color, _ = _get_mode_color()
-            clock = datetime.now().strftime("%H:%M")
+        if index == 1 or not _right_status_cells:
+            try:
+                mode_color, _ = _get_mode_color()
+                clock = datetime.now().strftime("%H:%M")
 
-            # Colors
-            BG_METRICS = CRUST
-            BG_USER = SURFACE0
-            BG_CLOCK = mode_color
+                # Colors
+                BG_METRICS = CRUST
+                BG_USER = SURFACE0
+                BG_CLOCK = mode_color
 
-            FG_METRICS = TEXT
-            FG_USER = mode_color
-            FG_CLOCK = CRUST
+                FG_METRICS = TEXT
+                FG_USER = mode_color
+                FG_CLOCK = CRUST
 
-            default_bg = as_rgb(int(draw_data.default_bg))
+                default_bg = as_rgb(int(draw_data.default_bg))
 
-            # Calculate essential width (user + clock only, without metrics)
-            user_host = (
-                f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
-            )
-            essential_cells = [
-                (BG_USER, default_bg, RIGHT_DIVIDER),
-                (FG_USER, BG_USER, f" {user_host} "),
-                (BG_CLOCK, BG_USER, RIGHT_DIVIDER),
-                (FG_CLOCK, BG_CLOCK, f"  {clock} "),
-            ]
-            essential_width = sum(wcswidth(str(t)) for _, _, t in essential_cells)
-            
-            # Calculate actual left side width
-            left_width = _calculate_left_side_width(draw_data, extra_data, all_tabs)
-            
-            # Calculate width if we include metrics
-            metrics_width = wcswidth(RIGHT_SOFT_DIVIDER + " ") + 5 + 5 + 6 + wcswidth(RIGHT_DIVIDER)
-            full_width = essential_width + metrics_width
-            
-            # Determine if we have space for metrics
-            # We need: left_width + full_width < screen.columns - margin
-            include_metrics = (left_width + full_width) < (screen.columns - 5)
+                # Calculate header width (mode + session)
+                header_width = _calculate_left_side_width(draw_data, extra_data, [])
+                
+                # Calculate user/host and clock essential width
+                user_host = f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
+                
+                essential_width = (
+                    wcswidth(RIGHT_SOFT_DIVIDER + " ") + 
+                    wcswidth(f" {user_host} ") + 
+                    wcswidth(RIGHT_DIVIDER) + 
+                    wcswidth(f"  {clock} ")
+                )
+                
+                # Metrics estimate
+                metrics_width = 5 + 5 + 6 + 3 # 3 spaces between them
+                full_width = essential_width + metrics_width + wcswidth(RIGHT_DIVIDER)
+                
+                # Determine if we have space for metrics
+                include_metrics = (header_width + full_width + (len(all_tabs) * 5)) < (screen.columns - 2)
 
-            cells = []
+                cells = []
 
-            if include_metrics:
-                # 1. Start with Soft Separator (backslash variant) and space
-                cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
+                if include_metrics:
+                    cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
+                    cpu = get_cpu_cells()
+                    mem = get_mem_cells()
+                    bat = get_battery_cells()
 
-                # Metrics content
-                cpu = get_cpu_cells()
-                mem = get_mem_cells()
-                bat = get_battery_cells()
+                    for color, text in cpu:
+                        cells.append((color, BG_METRICS, _wcsljust(text, 5) + " "))
+                    for color, text in mem:
+                        cells.append((color, BG_METRICS, _wcsljust(text, 5) + " "))
+                    for color, text in bat:
+                        cells.append((color, BG_METRICS, _wcsljust(text, 6) + " "))
 
-                # CPU - pad to fixed width
-                for color, text in cpu:
-                    padded_text = text.ljust(5)
-                    cells.append((color, BG_METRICS, padded_text + " "))
-                # Mem - pad to fixed width
-                for color, text in mem:
-                    padded_text = text.ljust(5)
-                    cells.append((color, BG_METRICS, padded_text + " "))
-                # Bat - pad to fixed width
-                for color, text in bat:
-                    padded_text = text.ljust(6)
-                    cells.append((color, BG_METRICS, padded_text + " "))
+                    cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
+                else:
+                    cells.append((BG_USER, default_bg, RIGHT_SOFT_DIVIDER + " "))
 
-                # 2. Transition to User
-                cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
-            else:
-                # No space for metrics, just essential with soft separator
-                cells.append((BG_USER, default_bg, RIGHT_SOFT_DIVIDER + " "))
+                cells.append((FG_USER, BG_USER, f" {user_host} "))
+                cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
+                cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
 
-            # 3. Add User and Clock (essential content)
-            cells.append((FG_USER, BG_USER, f" {user_host} "))
-            cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
-            cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
-
-            # Cache cells and calculate length
-            _right_status_cells = cells
-            right_status_length = 0
-            for _, _, text in cells:
-                right_status_length += wcswidth(str(text))
-
-        # Update cells for the last tab (to get fresh metrics/time for actual drawing)
-        if is_last:
-            mode_color, _ = _get_mode_color()
-            clock = datetime.now().strftime("%H:%M")
-
-            # Colors
-            BG_METRICS = CRUST
-            BG_USER = SURFACE0
-            BG_CLOCK = mode_color
-
-            FG_METRICS = TEXT
-            FG_USER = mode_color
-            FG_CLOCK = CRUST
-
-            default_bg = as_rgb(int(draw_data.default_bg))
-
-            # Re-check if we should include metrics (based on current left width)
-            left_width = _calculate_left_side_width(draw_data, extra_data, all_tabs)
-            user_host = (
-                f"{os.getenv('USER', 'user')}@{os.uname().nodename.split('.')[0]}"
-            )
-            essential_cells = [
-                (BG_USER, default_bg, RIGHT_DIVIDER),
-                (FG_USER, BG_USER, f" {user_host} "),
-                (BG_CLOCK, BG_USER, RIGHT_DIVIDER),
-                (FG_CLOCK, BG_CLOCK, f"  {clock} "),
-            ]
-            essential_width = sum(wcswidth(str(t)) for _, _, t in essential_cells)
-            metrics_width = wcswidth(RIGHT_SOFT_DIVIDER + " ") + 5 + 5 + 6 + wcswidth(RIGHT_DIVIDER)
-            full_width = essential_width + metrics_width
-            include_metrics = (left_width + full_width) < (screen.columns - 5)
-
-            cells = []
-
-            if include_metrics:
-                # Fetch fresh metrics for drawing
-                cpu = get_cpu_cells()
-                mem = get_mem_cells()
-                bat = get_battery_cells()
-
-                cells.append((BG_METRICS, default_bg, RIGHT_SOFT_DIVIDER + " "))
-
-                for color, text in cpu:
-                    padded_text = text.ljust(5)
-                    cells.append((color, BG_METRICS, padded_text + " "))
-                for color, text in mem:
-                    padded_text = text.ljust(5)
-                    cells.append((color, BG_METRICS, padded_text + " "))
-                for color, text in bat:
-                    padded_text = text.ljust(6)
-                    cells.append((color, BG_METRICS, padded_text + " "))
-
-                cells.append((BG_USER, BG_METRICS, RIGHT_DIVIDER))
-            else:
-                cells.append((BG_USER, default_bg, RIGHT_SOFT_DIVIDER + " "))
-
-            cells.append((FG_USER, BG_USER, f" {user_host} "))
-            cells.append((BG_CLOCK, BG_USER, RIGHT_DIVIDER))
-            cells.append((FG_CLOCK, BG_CLOCK, f"  {clock} "))
-
-            # Recalculate right_status_length with fresh cells
-            right_status_length = 0
-            for _, _, text in cells:
-                right_status_length += wcswidth(str(text))
+                _right_status_cells = cells
+                _right_status_len_cache = 0
+                for _, _, text in cells:
+                    _right_status_len_cache += wcswidth(str(text))
+                
+                right_status_length = _right_status_len_cache
+            except Exception:
+                # If calculation fails, fall back to safe empty state
+                _right_status_cells = []
+                _right_status_len_cache = 0
+                right_status_length = 0
         else:
-            # Use cached cells for non-last tabs
             cells = _right_status_cells
+            right_status_length = _right_status_len_cache
 
-        # Draw left side components - only for first tab to avoid duplicates
+        # Draw components
         if index == 1:
             orig_bold = screen.cursor.bold
             orig_italic = screen.cursor.italic
-
             screen.cursor.bold = True
             screen.cursor.italic = False
-
-            _draw_mode_indicator(screen, index, tab=tab, draw_data=draw_data)
-            _draw_session_info(screen, index, tab=tab, draw_data=draw_data)
-
+            _tab_bar_current_x = _draw_mode_indicator(screen, index, tab=tab, draw_data=draw_data)
+            screen.cursor.x = _tab_bar_current_x
+            _tab_bar_current_x = _draw_session_info(screen, index, tab=tab, draw_data=draw_data)
             screen.cursor.bold = orig_bold
             screen.cursor.italic = orig_italic
 
-        # Draw tab with reserved space for right status
-        _draw_left_status(
+        # Recalculate max_title_length to account for our custom left/right sections
+        num_tabs = len(all_tabs)
+        if num_tabs > 0:
+            # Estimate available space for tabs
+            header_width = _calculate_left_side_width(draw_data, extra_data, [])
+            available_for_tabs = screen.columns - header_width - right_status_length - 2
+            
+            # Divide available space equally among tabs
+            custom_max_title_len = max(1, (available_for_tabs // num_tabs) - 3)
+            effective_max_len = min(max_title_length, custom_max_title_len)
+        else:
+            effective_max_len = max_title_length
+
+        # Sync cursor to current tracker before drawing tab
+        screen.cursor.x = _tab_bar_current_x
+
+        # The end position of the left status (tabs)
+        _tab_bar_current_x = _draw_left_status(
             draw_data,
             screen,
             tab,
             before,
-            max_title_length,
+            effective_max_len,
             index,
             is_last,
             extra_data,
@@ -758,9 +788,20 @@ def draw_tab(
         
         # Only draw right status on last tab
         if is_last:
-            _draw_right_status(screen, is_last, cells)
+            # Explicitly set background color for the spacer and right status
+            screen.cursor.bg = as_rgb(int(draw_data.default_bg))
+            
+            # Ensure we only move forward or stay put
+            right_start_x = max(_tab_bar_current_x, screen.columns - right_status_length)
+            
+            # Fill the gap if any
+            if right_start_x > _tab_bar_current_x:
+                screen.cursor.x = _tab_bar_current_x
+                screen.draw(" " * (right_start_x - _tab_bar_current_x))
+            
+            screen.cursor.x = right_start_x
+            _tab_bar_current_x = _draw_right_status(screen, is_last, cells)
             
         return screen.cursor.x
     except Exception:
-        # Silently fail to avoid stderr output that could show as red text
         return screen.cursor.x
