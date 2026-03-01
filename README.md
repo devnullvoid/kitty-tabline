@@ -23,16 +23,19 @@ This project replaces Kitty's default tab bar with a functional status line that
 ## Installation
 
 1. Clone this repository:
+
    ```bash
    git clone https://github.com/devnullvoid/kitty-tabline.git ~/Dev/misc/kitty-tabline
    ```
 
 2. Symlink `tab_bar.py` to your Kitty configuration directory:
+
    ```bash
    ln -s ~/Dev/misc/kitty-tabline/tab_bar.py ~/.config/kitty/tab_bar.py
    ```
 
 3. Configure Kitty to use the custom tab bar in `~/.config/kitty/kitty.conf`:
+
    ```conf
    tab_bar_style custom
    ```
@@ -44,10 +47,7 @@ This project replaces Kitty's default tab bar with a functional status line that
 The script uses the Catppuccin Mocha palette by default. You can adjust colors and separators directly in `tab_bar.py`.
 
 Key settings in `tab_bar.py`:
+
 - `REFRESH_TIME`: How often to update system metrics (default: 1s).
 - `MAX_BRANCH_LEN`: Maximum width for the Git branch display.
 - Palette variables (e.g., `PEACH`, `MAUVE`, `SURFACE0`) for color customization.
-
-## License
-
-MIT
