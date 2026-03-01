@@ -24,33 +24,34 @@ The `tab_bar.py` script replaces Kitty's default tab bar with a highly customiza
 The `draw_tab` function is the main entry point, called by Kitty for each tab to be drawn. Its responsibilities include:
 
 1.  **Global Initialization:** Sets up a timer for redrawing the tab bar to update dynamic elements (like CPU, RAM, time).
-2.  **Right Status Calculation:** Gathers data for CPU, RAM, battery, user/host, and time, then constructs a list of `(fg, bg, text)` tuples (`cells`) for `_draw_right_status`. It also calculates `right_status_length` using `wcswidth` for accurate sizing.
-3.  **Left Status Drawing (First Tab Only):** For the *first* tab (`index == 1`), it orchestrates the drawing of:
+2.  **Sequential Drawing Architecture:** Instead of relying on Kitty's `before` parameter which can cause layout collisions with custom left-side UI elements, drawing is managed by a global `_tab_bar_current_x` tracker. Cursor movement is strictly forward-only.
+3.  **Right Status Calculation (First Tab Only):** Gathers data for CPU, RAM, battery, user/host, and time, then constructs a list of `(fg, bg, text)` tuples (`cells`) for `_draw_right_status`. It calculates `right_status_length` and caches it to ensure consistency across the draw cycle.
+4.  **Left Status Drawing (First Tab Only):** For the *first* tab (`index == 1`), it orchestrates the drawing of:
     *   `_draw_mode_indicator`: Displays the current Kitty mode.
-    *   `_draw_session_info`: Displays the active window's current working directory.
-    *   Crucially, it handles saving and restoring `screen.cursor` bold/italic states around these calls to prevent style bleed from the active tab's configuration.
-    *   It also calculates the `left_status_end_x` after drawing these components.
-4.  **Tab Centering Logic (First Tab Only):** For the *first* tab, it calculates the `total_tabs_width` by iterating through all available tabs (`get_boss().active_tab_manager.tabs`). It then determines the `padding` needed to center the tabs between the left status and right status areas and adjusts `screen.cursor.x` accordingly.
-5.  **Individual Tab Drawing:** Calls `_draw_left_status` for the current tab (`tab` parameter) to render its title, active indicator, and separators.
-6.  **Right Status Drawing (Last Tab Only):** Calls `_draw_right_status` only if `is_last` is `True` to draw the right-side status segments.
+    *   `_draw_session_info`: Displays the git branch and active process name (both cached to prevent layout stalls).
+5.  **Adaptive Tab Sizing:** Calculates available space dynamically (screen width minus custom left header and right status) and distributes it evenly among tabs to prevent boundary overflows.
+6.  **Individual Tab Drawing:** Calls `_draw_left_status` for the current tab (`tab` parameter) to render its title, using a custom Unicode-aware truncation (`_truncate_to_width`) to avoid spilling out of available space.
+7.  **Right Status Drawing (Last Tab Only):** Calls `_draw_right_status` only if `is_last` is `True` to draw the right-side status segments safely clamped to screen boundaries.
 
 ### Helper Functions
 
 *   `_get_mode_color()`: Determines the current Kitty mode and returns its corresponding color and name.
 *   `_draw_mode_indicator()`: Draws the mode display with icon and powerline separator.
-*   `_draw_session_info()`: Draws the current working directory with powerline separators. It uses `get_boss().active_tab.active_window.cwd_of_child` for accuracy.
-*   `_draw_left_status()`: Renders an individual tab's title, active/inactive indicator (`[]` or ``), and spacing.
+*   `_draw_session_info()`: Draws the git branch and process name with powerline separators.
+*   `_draw_left_status()`: Renders an individual tab's title, using custom width truncation.
 *   `_draw_right_status()`: Draws the pre-calculated list of right-side status segments with powerline background transitions.
 *   `_redraw_tab_bar()`: Marks the tab bar dirty to trigger a redraw, used by the timer.
+*   `_get_git_branch()` & `_get_process_name()`: Functions to retrieve session context, cached to prevent shell/subprocess overhead on every frame.
+*   `_truncate_to_width()` & `_wcsljust()`: Custom string manipulation functions that respect visual cell widths (using `wcswidth`) for safe padding and truncation.
 *   `get_battery_cells()`, `get_cpu_cells()`, `get_mem_cells()`: Functions to retrieve system metric data and format them into `(color, text)` tuples.
 
 ## Important Considerations for Future Modifications
 
-*   **`wcswidth` vs `len`:** Always use `wcswidth()` when calculating the visual length of strings, especially those containing Unicode icons or non-ASCII characters, to ensure correct alignment and prevent rendering issues. `len()` can severely underestimate visual width.
-*   **Cursor Management (`screen.cursor.x`):** Be mindful of `screen.cursor.x`. Kitty's `draw_tab` passes `before` as the starting `x` for the current tab. It is crucial to initialize `screen.cursor.x = before` at the beginning of `draw_tab` to ensure proper positioning, especially when implementing custom centering or complex layouts.
-*   **Kitty API Access:** Accessing global tab information requires `get_boss().active_tab_manager.tabs` rather than attributes of `draw_data`. Remember to handle `None` checks for `active_tab_manager` and `active_tab`.
-*   **Error Handling:** Custom tab bar scripts run within Kitty's process. Unhandled exceptions or import errors will cause Kitty to fall back to its default tab bar. Use `try...except` blocks and `import sys` at the top level to ensure robust logging.
-*   **Performance:** Frequent or complex calculations within `draw_tab` can impact Kitty's responsiveness. Optimize code for speed. The `_cpu_cached` mechanism demonstrates caching to avoid recalculating metrics too often.
+*   **`wcswidth` vs `len`:** Always use `wcswidth()` when calculating the visual length of strings, especially those containing Unicode icons or non-ASCII characters. `len()` will cause boundary overflows ("..."). Use the custom `_truncate_to_width` and `_wcsljust` for string manipulations.
+*   **Sequential Cursor Management (`_tab_bar_current_x`):** Ignore Kitty's provided `before` parameter for tabs. Because we insert custom left-side UI elements, relying on `before` causes layout misalignment. Instead, maintain the global `_tab_bar_current_x` to move sequentially forward. **Never move the cursor backward (`screen.cursor.x`)**, as this forces Kitty to render a visual error placeholder ("...").
+*   **Kitty API Access:** Accessing global tab information requires `get_boss().active_tab_manager.tabs` rather than attributes of `draw_data`. Always handle `None` checks for `get_boss()` and `active_tab_manager` gracefully.
+*   **Error Handling:** Custom tab bar scripts run within Kitty's process. Unhandled exceptions or import errors will cause Kitty to fall back to its default tab bar, or freeze the tab rendering. Wrap risky sections (like system metric lookups) in try/except blocks.
+*   **Performance:** The tab bar redraws frequently (every second or when state changes). Offload heavy calls like `subprocess.run` (e.g. `git rev-parse`) to cached helper functions.
 
 This script provides a solid foundation for a highly customized and functional Kitty tab bar.
 # Implementing left-aligned kitty tabline with hard/soft separators
